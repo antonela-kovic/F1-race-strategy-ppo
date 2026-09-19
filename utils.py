@@ -41,7 +41,7 @@ def load_true_actions(path="data/true_actions.npy"):
 # KORISTI OVU ISTU funkciju posvuda gdje se opažanje šalje modelu -
 # f1_env.py (trening), predict_strategies.py i api.py (inferencija) - jer bi
 # model treniran na skaliranim opažanjima davao besmislene predikcije na
-# neskaliranim i obrnuto. verify_action() u logic_layer.py i dalje prima
+# neskaliranim i obrnuto. verify_action() u safety_layer.py i dalje prima
 # SIROVO (neskalirano) stanje, jer njegovi pragovi (npr. tyre_life < 2.0,
 # front_gap < 1.5) pretpostavljaju stvarne jedinice.
 FEATURE_SCALE = {
