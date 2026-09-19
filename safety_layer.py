@@ -1,4 +1,4 @@
-# logic_layer.py
+# safety_layer.py
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Any, Optional, Set
 import numpy as np
