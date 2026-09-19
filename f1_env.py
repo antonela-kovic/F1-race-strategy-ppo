@@ -86,7 +86,7 @@ class FastF1MultiActionEnv(gym.Env):
 
         # Prati je li utrka do sada bila suha i koji su suhi compoundi korišteni,
         # potrebno za pravilo o obaveznih 2 tipa suhih guma (isto pravilo koje
-        # logic_layer.py primjenjuje kao post-processing - ovdje ga učimo i
+        # safety_layer.py primjenjuje kao post-processing - ovdje ga učimo i
         # kroz reward tako da se RAW politika sama približi SAFE ponašanju).
         # Sve ovo je PO UTRCI, resetira se i na granicama utrka u step().
         self.wet_or_damp_seen = False
@@ -314,7 +314,7 @@ class FastF1MultiActionEnv(gym.Env):
 
             # Kazna ako je TA utrka bila suha, a agent je do kraja
             # koristio samo JEDAN tip suhih guma (FIA: obavezna 2 tipa
-            # suhih guma po suhoj utrci) - isto pravilo koje logic_layer.py
+            # suhih guma po suhoj utrci) - isto pravilo koje safety_layer.py
             # kasnije prisilno korigira; ovdje ga agent uči izbjegavati sam.
             if not self.wet_or_damp_seen and len(self.dry_compounds_used) < 2:
                 reward -= 8.0
