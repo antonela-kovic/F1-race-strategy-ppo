@@ -172,7 +172,7 @@ budu testabilne izolirano.
 
 * `FrontGap`/`RearGap` (razmak do vozila ispred/iza) su sintetički generirani - FastF1 ne pruža pouzdan izvor za tu značajku na razini kruga.
 * `Style` (stil vožnje) ground truth je heuristički proxy izveden iz `FrontGap`/`RearGap`/`TyreLife`, ne stvarna telemetrija (u F1 podacima ne postoji izravna oznaka "stila").
-* Agent trenutno pita nešto češće od stvarnih vozača (~9-10% naspram stvarnih ~2.5%) - posljedica asimetrične nagrade uvedene da spriječi suprotan problem (agent koji nikad ne pita). Logički sloj (`logic_layer.py`) i dalje osigurava usklađenost sa strateškim pravilima neovisno o ovome.
+* Agent trenutno pita nešto češće od stvarnih vozača (~9-10% naspram stvarnih ~2.5%) - posljedica asimetrične nagrade uvedene da spriječi suprotan problem (agent koji nikad ne pita). Logički sloj (`safety_layer.py`) i dalje osigurava usklađenost sa strateškim pravilima neovisno o ovome.
 * Okruženje (`f1_env.py`) simulira raznolike scenarije (kišu, Safety Car) preko postojećih stvarnih podataka; nije puna fizička simulacija utrke - `TyreLife` i ostale značajke ne mijenjaju se dinamički kao posljedica agentovih odluka unutar jednog prolaska kroz podatke.
 * `LSTMFeatureExtractor` (`model.py`) je pripremljen kao osnova za budući rad prema recurrentnoj politici, ali trenutno nije uključen u trening - za stvarnu memoriju kroz krugove bio bi potreban `RecurrentPPO` (sb3-contrib), ne standardni `PPO`.
 
