@@ -1,203 +1,180 @@
+# F1 RL Agent – PPO Strategija
 
-### F1 RL Agent – PPO Strategija + Logički sloj (RAW → SAFE)
-
-Ovaj projekt koristi **PPO (Proximal Policy Optimization)** za treniranje agenta koji optimizira strategiju utrkivanja (pit stop, izbor guma, stil vožnje) koristeći stvarne podatke iz **FastF1** biblioteke. Uveden je **deterministički logički sloj post-verifikacije** koji provjerava PPO odluke i po potrebi radi korekciju:
-- **RAW** = originalna PPO odluka
-- **SAFE** = odluka nakon provjere pravila + korekcija (override)
-- generira se i **audit report** (kršenja + što je promijenjeno i zašto)
+Ovaj projekt koristi PPO (Proximal Policy Optimization) za treniranje agenta koji optimizira strategiju utrkivanja (pit stop, izbor guma, stil vožnje) koristeći stvarne podatke iz FastF1 biblioteke.
 
 ---
 
-### KORACI ZA POKRETANJE
+## KORACI ZA POKRETANJE
 
-### 0) Instalacija ovisnosti
-
-```bash
-pip install -r requirements.txt
-````
-
-Ako koristiš API:
+### 1. Priprema i treniranje agenta
 
 ```bash
-pip install fastapi uvicorn
+python prepare_data.py        # Generira podatke za treniranje (više vozača i trka)
+python train.py               # Pokreće PPO treniranje s curriculum logikom
 ```
 
-> Napomena: projekt koristi Stable-Baselines3 (PPO), Gymnasium/Gym kompatibilnost, FastF1 i standardne znanstvene biblioteke (NumPy, Pandas, Matplotlib…).
+> Koriste se podaci iz trka: Silverstone, Monza, Spa (2023), vozači: VER, HAM, LEC, PER
 
 ---
 
-### 1) Priprema podataka (FastF1 → CSV/NPY)
+### 2. Pokretanje REST API-ja
 
-```bash
-python prepare_data.py
-python convert_to_npy.py
-```
-
-* `prepare_data.py` dohvaća i priprema podatke (više vozača i više utrka)
-* `convert_to_npy.py` generira NPY datoteke koje se koriste u treningu/evaluaciji
-
-Primjeri korištenih podataka (ovisno o konfiguraciji skripti):
-
-* staze: Silverstone, Monza, Spa (npr. 2023)
-* vozači: VER, HAM, LEC, PER
-
----
-
-### 2) Treniranje PPO agenta
-
-```bash
-python train.py
-```
-
-Trening uključuje:
-
-* PPO agent (policy + value mreža)
-* curriculum logiku (easy → medium → full) ovisno o implementaciji u `train.py`
-* spremanje modela u `saved_models/`
-
----
-
-### 3) Brzi test okruženja (opcionalno)
-
-Ako želiš brzo provjeriti da env radi i da NPY datoteke postoje:
-
-```bash
-python test_env.py
-```
-
----
-
-### 4) Evaluacija / Analiza rezultata
-
-Možeš koristiti:
-
-* `main.ipynb` (notebook evaluacija + grafovi)
-* `main.py` (ako ti je lakše skriptno)
-
----
-
-## LOGIČKI SLOJ (post-verification)
-
-Logički sloj je implementiran u:
-
-* `logic_layer.py`
-
-Radi kao **post-processing** nad PPO odlukom:
-
-* ulaz: `(state, raw_action)`
-* izlaz: `(safe_action, report)`
-
-### Što report sadrži?
-
-* `violations_before`: popis detektiranih kršenja pravila na RAW akciji
-* `overrides`: popis korekcija (koje polje je promijenjeno, RAW → SAFE, i objašnjenje)
-
-### Tipična pravila (primjer ideje)
-
-* ako je `WET` → dopuštene samo `INTER/WET` gume
-* ako je `TyreLife` ispod praga → zabrani agresivni stil
-* ako je `FrontGap` mali → ublaži stil (aggressive → normal/conservative)
-
-> Pravila su namjerno “minimalna obrana” (hard constraints) i cilj im je smanjiti nelogične ili domenski neispravne odluke.
-
----
-
-## REST API (FastAPI)
-
-Pokretanje:
+U korijenskom direktoriju pokreni FastAPI:
 
 ```bash
 uvicorn api:app --reload
 ```
 
-* API: `http://127.0.0.1:8000`
-* Swagger: `http://127.0.0.1:8000/docs`
+Alternativa:
 
-### Endpointi
-
-| Endpoint                       | Opis                                                                   |
-| ------------------------------ | ---------------------------------------------------------------------- |
-| `GET /`                        | Health-check                                                           |
-| `POST /predict_strategy`       | Predikcija strategije za jedno stanje (**RAW + SAFE + report**)        |
-| `POST /predict_strategy_batch` | Predikcija za više stanja + agregirane statistike (npr. override rate) |
-| `POST /explain_strategy`       | Objašnjenje odluke (interpretacija) + logički report                   |
-
-**Ulazni format (primjer):**
-
-```json
-{
-  "state": [ ... ]
-}
+```bash
+python -m uvicorn api:app --reload
 ```
 
-**Batch format:**
+* API dostupan na: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+* Swagger sučelje: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+---
+
+### 3. Evaluacija i testiranje
+
+#### U VS Code
+
+* Otvori `main.ipynb` i izvrši sve ćelije (`Shift + Enter`)
+* Provjeri točnost agenta i ponašanje po tipu vremena
+
+#### Alternativa (Jupyter)
+
+```bash
+jupyter notebook
+```
+
+Zatim otvori `main.ipynb`.
+
+---
+
+## Funkcionalnosti
+
+*  Višestazni podaci i više vozača
+*  Imitacija ljudskih odluka (PIT, compound, stil)
+*  Vremenski uvjeti: suho, mokro, kiša
+*  Curriculum težina (easy → medium → full)
+*  REST API s objašnjenjima odluka
+*  Vizualizacije:
+
+  * Reward po epizodi (smoothed)
+  * Agent vs Vozač ponašanje
+  * Reward po vremenskim uvjetima
+  * Distribucija guma
+
+---
+
+## Evaluacija agenta
+
+U `main.ipynb` dostupni su grafovi i točnost predikcije:
+
+* `Točnost izbora PIT-a`
+* `Točnost izbora GUMA`
+* `Točnost STILA vožnje`
+* Interpretacija akcije (npr. "PIT: DA, Gume: Inter, Stil: Štedljivo")
+
+---
+
+## REST API endpointi
+
+| Endpoint                       | Opis                                              |
+| ------------------------------ | ------------------------------------------------- |
+| `GET /`                        | Test da je server pokrenut                        |
+| `POST /predict_strategy`       | Predikcija strategije za jedno stanje             |
+| `POST /predict_strategy_batch` | Predikcija strategije za više stanja (lista dict) |
+| `POST /explain_strategy`       | Objašnjenje strategije na temelju ulaznog stanja  |
+
+> Napomena: za `batch`, očekuje se: `[{"state": [...]}, {"state": [...]}]`
+
+Primjeri za testiranje u Swagger sučelju (`/docs`), za `POST /predict_strategy`:
 
 ```json
-[
-  {"state": [ ... ]},
-  {"state": [ ... ]}
-]
+// 1. Suha staza, dobre gume
+{"state": [20, 1, 12, 2, 1, 5, 91.2, 30.5, 30.1, 1.8, 2.2, 1, 30.0, 22.0, 1]}
+
+// 2. Mokra staza, istrošene gume
+{"state": [5, 2, 22, 2, 1, 8, 100.5, 35.0, 34.0, 0.5, 1.0, 2, 23.0, 18.0, 2]}
+
+// 3. Kišni uvjeti, agresivan stil
+{"state": [7, 3, 18, 1, 1, 4, 105.0, 36.5, 35.2, 0.8, 1.5, 1, 19.0, 16.0, 3]}
+
+// 4. Vruća staza, medium compound
+{"state": [15, 1, 9, 1, 1, 3, 95.0, 31.0, 30.0, 2.5, 3.0, 0, 36.0, 28.0, 1]}
 ```
 
 ---
 
-## Funkcionalnosti (sažetak)
+## Testiranje API-ja
 
-* Višestazni podaci i više vozača (FastF1)
-* PPO agent treniran za strategijske odluke:
+Pokreni `main.ipynb` za:
 
-  * PIT stop
-  * tyre compound
-  * stil vožnje
-* Vremenski uvjeti uključeni u stanje (kao feature)
-* Curriculum learning (ovisno o `train.py`)
-* Logički sloj post-verifikacije: RAW → SAFE + audit report
-* REST API za integraciju i online testiranje
-* Evaluacija i vizualizacije (reward, distribucije, usporedbe)
+* Slanje zahtjeva prema API-ju
+* Provjeru interpretacija i odgovora
+* Prikaz grafova po koraku (reward, akcije)
 
 ---
 
-## Ulazne značajke (state)
+## Ovisnosti
 
-Odabrane značajke su definirane u `utils.py` kao `selected_features` (primjer):
+`requirements.txt` sadrži sve potrebno (uključujući `shimmy` i `gym`, potrebne jer projekt koristi stariju `gym` API-ju uz noviji `stable-baselines3`):
 
-* `TyreLife`, `CompoundEncoded`, `LapNumber`, `TrackStatus`, `Position`, `LapTime`, `Sector1Time`, `Sector2Time`,
-* `FrontGap`, `RearGap`, `Stint`, `TrackTemperature`, `AirTemperature`,
-* `Weather`, …
-
-> Dimenzionalnost stanja ovisi o listi `selected_features` i treba biti konzistentna između prepare_data → env → model.
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
 ## Struktura projekta
 
 ```
-VS_Code verzija-finall/
-├─ api.py                  # FastAPI sučelje (RAW + SAFE + report)
-├─ logic_layer.py          # Post-verifikacija pravila (override + audit)
-├─ f1_env.py               # RL okruženje (reward, step, reset...)
-├─ train.py                # PPO treniranje
-├─ test_env.py             # Brzi test okruženja i podataka
-├─ prepare_data.py         # Dohvat i priprema FastF1 podataka
-├─ convert_to_npy.py       # Konverzija u .npy (obs/actions)
-├─ finetune.py             # (opcionalno) dodatno ugađanje
-├─ main.py                 # (opcionalno) skriptna evaluacija
-├─ main.ipynb              # evaluacija + grafovi + API testiranje
-├─ utils.py                # pomoćne funkcije + selected_features
-├─ data/                   # .npy / CSV podaci
-├─ saved_models/           # spremljeni modeli
-└─ requirements.txt        # ovisnosti
+VS_Code verzija/
+├\api.py                   # FastAPI sučelje
+├\f1_env.py                # Okruženje s nagradnom funkcijom i vremenskim uvjetima
+├\model.py                 # LSTMFeatureExtractor - eksperimentalna komponenta za budući
+│                           # rad, trenutno se NE koristi (train.py koristi standardnu
+│                           # MLP arhitekturu 256-128-64 definiranu izravno u PPO pozivu)
+├\train.py                 # PPO treniranje s evaluacijama
+├\prepare_data.py          # Učitavanje i spremanje FastF1 podataka
+├\.ipynb                   # Evaluacija + API testiranje
+├\predict_strategies.py    # Evaluacija RAW vs SAFE (logički sloj), R10 provjera po utrci
+├\utils.py                 # Helper funkcije, značajke, skaliranje opažanja
+├\saved_models/            # Trenirani modeli
+├\data/                    # .npy i CSV podaci
+└\requirements.txt         # Python ovisnosti
 ```
 
 ---
 
-## Tipični workflow (najkraće)
+## Testiranje
 
-1. `python prepare_data.py`
-2. `python convert_to_npy.py`
-3. `python train.py`
-4. (opcionalno) `python test_env.py`
-5. `uvicorn api:app --reload` + test preko `/docs`
-6. evaluacija u `main.ipynb`
+Projekt ima jedinične testove (pytest) za dijelove koda koji ne ovise o
+FastF1 mreži ni o treniranom modelu - pravila u `logic_layer.py`, mehaniku
+okruženja u `f1_env.py` (segmentacija utrka, miješanje redoslijeda, per-utrka
+bookkeeping) i pomoćne funkcije u `utils.py`:
 
+```bash
+pytest -v
+```
+
+`prepare_data.py` se namjerno ne testira izravno jer na vrhu datoteke odmah
+pokreće FastF1 mrežne pozive - njegove čiste (bez I/O) pomoćne funkcije
+(`classify_weather`, `worst_track_status`) žive u `utils.py` upravo zato da
+budu testabilne izolirano.
+
+---
+
+## Poznata ograničenja
+
+* `FrontGap`/`RearGap` (razmak do vozila ispred/iza) su sintetički generirani - FastF1 ne pruža pouzdan izvor za tu značajku na razini kruga.
+* `Style` (stil vožnje) ground truth je heuristički proxy izveden iz `FrontGap`/`RearGap`/`TyreLife`, ne stvarna telemetrija (u F1 podacima ne postoji izravna oznaka "stila").
+* Agent trenutno pita nešto češće od stvarnih vozača (~9-10% naspram stvarnih ~2.5%) - posljedica asimetrične nagrade uvedene da spriječi suprotan problem (agent koji nikad ne pita). Logički sloj (`logic_layer.py`) i dalje osigurava usklađenost sa strateškim pravilima neovisno o ovome.
+* Okruženje (`f1_env.py`) simulira raznolike scenarije (kišu, Safety Car) preko postojećih stvarnih podataka; nije puna fizička simulacija utrke - `TyreLife` i ostale značajke ne mijenjaju se dinamički kao posljedica agentovih odluka unutar jednog prolaska kroz podatke.
+* `LSTMFeatureExtractor` (`model.py`) je pripremljen kao osnova za budući rad prema recurrentnoj politici, ali trenutno nije uključen u trening - za stvarnu memoriju kroz krugove bio bi potreban `RecurrentPPO` (sb3-contrib), ne standardni `PPO`.
+
+---
 

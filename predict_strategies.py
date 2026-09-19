@@ -1,21 +1,38 @@
 # === predict_strategies.py ===
+# === Nadogradnja 4: Predikcija strategija drugih vozača ===
+# Dodajemo novu funkciju koja koristi trenirani agent da predvidi strategiju za stvarne lapove
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
-from utils import selected_features
-from logic_layer import verify_action
+from utils import selected_features, scale_observation
+from logic_layer import verify_action, RaceState
 
 # Učitaj model i podatke ovisno o modelu koji ti treba
-#model = PPO.load("saved_models/ppo_f1_rl.zip") --> stari model bez ent_coef u train.py i logic_layera
-#model = PPO.load("saved_models/ppo_f1_rl_logic_v2.zip") # --> novi model sa ent_coef i logic_layer
-#model = PPO.load("saved_models/ppo_f1_rl_logic_v3_finetuned.zip") #--> novi model sa finetuningom kako bi se povecala tocnost za stil
-model = PPO.load("saved_models/ppo_f1_rl_logic_v4_retrained.zip") # model sa popravljenim pit stopom u f1_env.py
+# Povijest verzija modela (najnoviji dolje, samo taj se stvarno učitava):
+#   v1 ppo_f1_rl.zip                    - bez ent_coef, bez logičkog sloja
+#   v2 ppo_f1_rl_logic_v2.zip           - dodan ent_coef i logički sloj
+#   v3 ppo_f1_rl_logic_v3_finetuned.zip - fine-tuning radi točnosti stila
+#   v5 ppo_f1_rl_logic_v5_retrained.zip - popravljen pit stop u f1_env.py
+#   v6 ppo_f1_rl_logic_v6_retrained.zip - skalirana opažanja, uklonjen LSTM,
+#                                          per-utrka bookkeeping, asimetrična
+#                                          nagrada za pit (vidi f1_env.py)
+#   v6_best (preporučeno) - checkpoint s najboljim reward/korak tijekom
+#                            treninga v6, spremljen odvojeno od zadnjeg modela
+#                            jer PPO zna biti nestabilan pred kraj treninga
+model = PPO.load("saved_models/ppo_f1_rl_logic_v6_best.zip")
 obs_array = np.load("data/obs_array.npy")
 true_actions = np.load("data/true_actions.npy")
 
+# Predikcije
+# predicted_actions = []
+# for obs in obs_array:
+#     action, _ = model.predict(obs.reshape(1, -1), deterministic=True)
+#     action = action[0] if isinstance(action[0], (list, np.ndarray)) else action
+#     predicted_actions.append(action)
 
+# predicted_actions = np.array(predicted_actions)
 # Nadogradnja za logički sloj
 viol_before = 0
 #viol_after = 0
@@ -28,15 +45,50 @@ safe_actions = []
 pit_overrides = 0
 comp_overrides = 0
 style_overrides = 0
+mandatory_compound_events = 0  # koliko puta je aktivirano R10 (2 obavezna compounda)
 
-for obs in obs_array:
-    action, _ = model.predict(obs.reshape(1, -1), deterministic=True)
+# === VAŽNO: obs_array je SPOJ VIŠE STVARNIH UTRKA (različite staze/vozači), ===
+# === NE jedna dugačka utrka! Bez segmentacije, R10 ("zadnja 3 kruga prije   ===
+# === kraja") bi provjeravao samo zadnja 3 retka CIJELOG spojenog niza, a   ===
+# === ne kraj svake pojedine utrke - pa bi se pravilo praktički nikad ne bi ===
+# === aktiviralo za 11 od 12 utrka u datasetu.                              ===
+# Segmentaciju radimo prema padu vrijednosti LapNumber (pad => nova utrka/vozač).
+i_lap = selected_features.index("LapNumber")
+i_weather = selected_features.index("Weather")
+
+lap_numbers = obs_array[:, i_lap]
+race_start_indices = [0]
+for idx in range(1, len(lap_numbers)):
+    if lap_numbers[idx] < lap_numbers[idx - 1]:
+        race_start_indices.append(idx)
+race_start_indices.append(len(obs_array))
+
+n_races = len(race_start_indices) - 1
+print(f"[Segmentacija] Detektirano {n_races} zasebnih utrka/stintova u obs_array "
+      f"(duljine: {[race_start_indices[k+1]-race_start_indices[k] for k in range(n_races)]})")
+
+races_dry_ok = 0
+races_dry_total = 0
+
+race_state = None  # instanciramo iznova za svaku utrku u petlji ispod
+seg_end = 0
+
+for row_idx, obs in enumerate(obs_array):
+    # Je li ovo prvi krug nove utrke? Ako da, napravi NOVI RaceState.
+    if row_idx in race_start_indices[:-1]:
+        pos = race_start_indices.index(row_idx)
+        seg_end = race_start_indices[pos + 1]
+        race_state = RaceState(total_laps=seg_end - row_idx, force_window=3)
+
+    action, _ = model.predict(scale_observation(obs).reshape(1, -1), deterministic=True)
     raw = action[0] if isinstance(action[0], (list, np.ndarray)) else action
     raw = np.array(raw, dtype=np.int32)
 
-    raw_actions.append(raw)   # <-- provjera tocnosti pit stop-a
+    raw_actions.append(raw)   # <-- DODAJ OVO za provjeru tocnosti pit stop-a
 
-    safe, report = verify_action(obs, raw, selected_features)
+    # verify_action i dalje prima SIROVO (neskalirano) stanje - njegovi pragovi
+    # (tyre_life < 2.0, front_gap < 1.5, itd.) pretpostavljaju stvarne jedinice.
+    safe, report = verify_action(obs, raw, selected_features, race_state=race_state)
 
     # Broji override po polju (pit/compound/style)
     for o in report.overrides:
@@ -46,19 +98,34 @@ for obs in obs_array:
             comp_overrides += 1
         elif o["field"] == "style":
             style_overrides += 1
-    
+        if o["rule"] == "R10_MANDATORY_TWO_DRY_COMPOUNDS":
+            mandatory_compound_events += 1
 
     # metrike
     if len(report.violations_before) > 0:
         viol_before += 1
     if len(report.overrides) > 0:
         overrides_count += 1
-  
 
     safe_actions.append(safe)
 
+    # Ažuriraj povijest TE utrke SA SAFE (primijenjenim) compoundom, ne raw-om
+    race_state.record(weather=int(round(float(obs[i_weather]))), compound=int(safe[1]))
+
+    # Je li ovo zadnji krug ove utrke? Ako da, provjeri je li pravilo zadovoljeno.
+    if row_idx + 1 == seg_end:
+        if race_state.is_dry_race_so_far:
+            races_dry_total += 1
+            ok = len(race_state.dry_compounds_used) >= 2
+            races_dry_ok += int(ok)
+
+print(f"\n[R10 provjera] Suhih utrka u datasetu: {races_dry_total}")
+print(f"[R10 provjera] Od toga zadovoljavaju pravilo (≥2 suha compounda): {races_dry_ok}/{races_dry_total}")
+print(f"[R10 provjera] Broj puta kad je R10 morao intervenirati (ukupno kroz sve utrke): {mandatory_compound_events}")
 
 
+# safe_actions = np.array(safe_actions, dtype=np.int32)
+# predicted_actions = np.array(safe_actions)
 # Izmjena zbog provjere pit stopa
 raw_actions = np.array(raw_actions, dtype=np.int32)
 safe_actions = np.array(safe_actions, dtype=np.int32)
@@ -68,7 +135,7 @@ predicted_actions = safe_actions   # default: logički sloj uključen
 # predicted_actions = raw_actions  # ako želiš vidjeti ponašanje bez logike
 
 # Nadogradnja:  Dodaj guard da ne dijeliš s nulom (ako bi obs_array ikad bio prazan):
-
+# print(f"Logic layer override rate: {overrides_count/len(obs_array):.2%}")
 n = len(obs_array)
 print(f"Logic layer override rate: {overrides_count/n:.2%}" if n else "No samples.")
 print(f"Violations (raw): {viol_before/len(obs_array):.2%}")
@@ -133,4 +200,3 @@ plt.xlabel("Stil (0-2)")
 
 plt.tight_layout()
 plt.show()
-

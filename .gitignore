@@ -1,17 +1,28 @@
+# Virtualno okruženje - regenerira se s: pip install -r requirements.txt
 venv/
 .venv/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 
-.vscode/
+# FastF1 cache - regenerira se automatski pri pokretanju prepare_data.py
+data/cache/
 
-.pytest_cache/
-.mypy_cache/
+# Generirani podaci (regeneriraju se s prepare_data.py) - zadrži ako želiš
+# da netko odmah može trenirati bez FastF1 API poziva, inače otkomentiraj:
+# data/*.npy
+# data/*.csv
 
-.env
-*.log
+# Bilježnice - checkpointi
+.ipynb_checkpoints/
 
+# OS/editor
 .DS_Store
-Thumbs.db
+.vscode/
+*.swp
+
+# pytest
+.pytest_cache/

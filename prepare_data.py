@@ -2,9 +2,9 @@
 import os
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import LabelEncoder
 import fastf1
 import matplotlib.pyplot as plt
+from utils import COMPOUND_TO_CODE, classify_weather, worst_track_status
 
 # Postavi cache
 os.makedirs("data/cache", exist_ok=True)
@@ -22,12 +22,30 @@ all_laps = []
 for year, gp, session_type in races:
     session = fastf1.get_session(year, gp, session_type)
     session.load()
+
+    # Stvarni vremenski podaci za CIJELU sesiju (dijele ga svi vozači)
+    weather_data = session.weather_data.copy().sort_values("Time").reset_index(drop=True)
+
     for drv in drivers:
         laps = session.laps.pick_driver(drv)
         laps = laps[laps['LapTime'].notnull()].copy()
         laps["Driver"] = drv
         laps["Year"] = year
         laps["Track"] = gp
+        laps = laps.sort_values("Time").reset_index(drop=True)
+
+        # Spoji sa STVARNIM vremenskim podacima (umjesto nasumičnog generiranja) -
+        # merge_asof nalazi najbliži vremenski uzorak weather_data za svaki krug
+        laps = pd.merge_asof(
+            laps, weather_data[["Time", "Rainfall", "TrackTemp", "AirTemp"]],
+            on="Time", direction="nearest"
+        )
+        # Preferiraj stvarne TrackTemp/AirTemp iz weather_data ako lap podaci nemaju svoje
+        if "TrackTemperature" not in laps or laps["TrackTemperature"].isna().all():
+            laps["TrackTemperature"] = laps["TrackTemp"]
+        if "AirTemperature" not in laps or laps["AirTemperature"].isna().all():
+            laps["AirTemperature"] = laps["AirTemp"]
+
         # Provjera je li postoje FrontGap i RearGap
         if "FrontGap" not in laps:
             laps["FrontGap"] = np.random.uniform(0.5, 5.0, size=len(laps))
@@ -44,9 +62,12 @@ for year, gp, session_type in races:
 
 laps = pd.concat(all_laps).reset_index(drop=True)
 
-# Kodiranje compounda
-compound_encoder = LabelEncoder()
-laps["CompoundEncoded"] = compound_encoder.fit_transform(laps["Compound"])
+# Kodiranje compounda - koristi ISTU konvenciju kao akcijski prostor agenta
+# (0 SOFT, 1 MEDIUM, 2 HARD, 3 INTERMEDIATE, 4 WET), a ne proizvoljni
+# alfabetski poredak LabelEncoder-a (koji bi HARD stavio na 0, itd.)
+# (COMPOUND_TO_CODE se sad uvozi iz utils.py, dijeli ga i logic_layer.py)
+laps["CompoundEncoded"] = laps["Compound"].str.upper().map(COMPOUND_TO_CODE)
+laps["CompoundEncoded"] = laps["CompoundEncoded"].fillna(1).astype(int)  # nepoznato -> MEDIUM
 
 # Vrijeme u sekunde
 for col in ["LapTime", "Sector1Time", "Sector2Time"]:
@@ -54,8 +75,13 @@ for col in ["LapTime", "Sector1Time", "Sector2Time"]:
 
 laps["Pit"] = laps["PitInTime"].notnull().astype(int)
 
-# Generacija vremena
-laps["Weather"] = np.random.choice([1, 2, 3], size=len(laps), p=[0.6, 0.3, 0.1])
+# === STVARNO vrijeme (umjesto nasumičnog generiranja) ===
+# Koristimo pravi Rainfall signal iz FastF1 weather_data (spojen ranije preko merge_asof)
+# - vidi classify_weather() u utils.py za značenje kodova 1/2/3.
+laps["Weather"] = 1
+for (drv, yr, trk), group in laps.groupby(["Driver", "Year", "Track"], sort=False):
+    idx = group.index
+    laps.loc[idx, "Weather"] = classify_weather(group["Rainfall"].tolist())
 
 # Heuristički stil vožnje
 def assign_style(row):
@@ -68,20 +94,15 @@ def assign_style(row):
 
 laps["Style"] = laps.apply(assign_style, axis=1)
 
-# Heuristički compound izbor
-def decide_compound(row):
-    if row["Weather"] == 3:
-        return 4  # WET
-    elif row["Weather"] == 2:
-        return 3  # INTER
-    elif row["TrackTemperature"] > 32:
-        return 0  # SOFT
-    elif row["TrackTemperature"] < 20:
-        return 2  # HARD
-    else:
-        return 1  # MEDIUM
+# CompoundChoice (ground truth za usporedbu s vozačem) = STVARNA guma koju
+# je vozač koristio u tom krugu (ista konvencija kao CompoundEncoded gore),
+# umjesto ranije heurističke funkcije koja je ovisila o nasumičnom Weatheru.
+laps["CompoundChoice"] = laps["CompoundEncoded"]
 
-laps["CompoundChoice"] = laps.apply(decide_compound, axis=1)
+# === TrackStatus: FastF1 ga sprema kao STRING SPOJENIH kodova - vidi
+# worst_track_status() u utils.py za objašnjenje i dekodiranje.
+if "TrackStatus" in laps.columns:
+    laps["TrackStatus"] = laps["TrackStatus"].apply(worst_track_status)
 
 # Značajke
 selected_features = [
