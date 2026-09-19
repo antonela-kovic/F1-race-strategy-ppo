@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 from utils import selected_features, scale_observation
-from logic_layer import verify_action, RaceState
+from safety_layer import verify_action, RaceState
 
 # Učitaj model i podatke ovisno o modelu koji ti treba
 # Povijest verzija modela (najnoviji dolje, samo taj se stvarno učitava):
