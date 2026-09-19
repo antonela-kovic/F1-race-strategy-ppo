@@ -65,7 +65,7 @@ laps = pd.concat(all_laps).reset_index(drop=True)
 # Kodiranje compounda - koristi ISTU konvenciju kao akcijski prostor agenta
 # (0 SOFT, 1 MEDIUM, 2 HARD, 3 INTERMEDIATE, 4 WET), a ne proizvoljni
 # alfabetski poredak LabelEncoder-a (koji bi HARD stavio na 0, itd.)
-# (COMPOUND_TO_CODE se sad uvozi iz utils.py, dijeli ga i logic_layer.py)
+# (COMPOUND_TO_CODE se sad uvozi iz utils.py, dijeli ga i safety_layer.py)
 laps["CompoundEncoded"] = laps["Compound"].str.upper().map(COMPOUND_TO_CODE)
 laps["CompoundEncoded"] = laps["CompoundEncoded"].fillna(1).astype(int)  # nepoznato -> MEDIUM
 
