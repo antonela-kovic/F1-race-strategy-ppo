@@ -63,7 +63,7 @@ def test_worst_track_status_priority_order_is_red_first():
 # --- COMPOUND_TO_CODE ---
 
 def test_compound_to_code_matches_action_space_convention():
-    # Ova konvencija MORA se poklapati s onom u logic_layer.py
+    # Ova konvencija MORA se poklapati s onom u safety_layer.py
     # (COMPOUND_NAMES) i s akcijskim prostorom agenta (f1_env.py)
     assert COMPOUND_TO_CODE == {
         "SOFT": 0, "MEDIUM": 1, "HARD": 2, "INTERMEDIATE": 3, "WET": 4
