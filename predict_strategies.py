@@ -33,7 +33,7 @@ true_actions = np.load("data/true_actions.npy")
 #     predicted_actions.append(action)
 
 # predicted_actions = np.array(predicted_actions)
-# Nadogradnja za logički sloj
+# Nadogradnja za safety sloj
 viol_before = 0
 #viol_after = 0
 overrides_count = 0
