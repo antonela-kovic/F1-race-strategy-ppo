@@ -1,0 +1,18 @@
+#Ovdje se nalaze sve potrebne biblioteke i podaci koje treba instalirati za rad agenta
+#Ispod je verzija ako unutar terminala instaliramo datoteke
+              # pip install fastapi uvicorn
+              # pip install fastf1
+              # pip install scikit-learn
+              # pip install numpy pandas matplotlib
+              # pip install stable-baselines3[extra]
+fastapi
+uvicorn
+fastf1
+scikit-learn
+pandas
+matplotlib
+numpy
+stable-baselines3[extra]
+.txt
+#Instalacija: pip install -r requirements
+#Ovo isto intsaliraj: pip install "shimmy>=2.0"
