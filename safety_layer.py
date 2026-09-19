@@ -51,7 +51,7 @@ class RaceState:
 
 
 @dataclass
-class LogicReport:
+class SafetyReport:
     violations_before: List[str]
     overrides: List[Dict[str, Any]]
     rules_triggered: List[str]
@@ -65,7 +65,7 @@ def verify_action(
     selected_features: List[str],
     config: Dict[str, float] | None = None,
     race_state: Optional[RaceState] = None,
-) -> Tuple[np.ndarray, LogicReport]:
+) -> Tuple[np.ndarray, SafetyReport]:
     """
     state: shape (n_features,)
     action: shape (3,) -> [pit, compound, style]
@@ -244,7 +244,7 @@ def verify_action(
 
     safe_action = np.array([pit, comp, style], dtype=np.int32)
 
-    report = LogicReport(
+    report = SafetyReport(
         violations_before=violations,
         overrides=overrides,
         rules_triggered=triggered

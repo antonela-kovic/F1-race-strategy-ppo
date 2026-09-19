@@ -1,6 +1,6 @@
-# === test_logic_layer.py ===
-# Jedinični testovi za logic_layer.py (pravila R1-R10 i RaceState). Pokreni s:
-#   pytest test_logic_layer.py -v
+# === test_safety_layer.py ===
+# Jedinični testovi za safety_layer.py (pravila R1-R10 i RaceState). Pokreni s:
+#   pytest test_safety_layer.py -v
 import numpy as np
 import pytest
 
