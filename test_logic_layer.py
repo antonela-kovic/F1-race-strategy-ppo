@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from logic_layer import verify_action, RaceState, humanize_action
+from safety_layer import verify_action, RaceState, humanize_action
 
 SELECTED_FEATURES = [
     "TyreLife", "CompoundEncoded", "LapNumber", "TrackStatus",
