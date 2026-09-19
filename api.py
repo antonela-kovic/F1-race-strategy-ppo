@@ -6,7 +6,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from typing import Optional
 from utils import selected_features, scale_observation
-from logic_layer import verify_action, humanize_action, RaceState
+from safety_layer import verify_action, humanize_action, RaceState
 from collections import Counter
 
 # Učitaj trenirani model
@@ -69,7 +69,7 @@ def predict_strategy(obs: Observation):
     state = np.array([obs.state], dtype=np.float32)
     action, _ = model.predict(scale_observation(state), deterministic=True)
 
-    # Logički sloj - nadogradnja
+    # Safety sloj - nadogradnja
     raw_action = action[0] if isinstance(action[0], (list, np.ndarray)) else action
     raw_action = np.array(raw_action, dtype=np.int32)
 
