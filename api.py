@@ -1,4 +1,6 @@
-# === api.py ===
+# api.py
+# FastAPI service that returns race-strategy predictions from the trained PPO
+# agent, verified and explained by the rule-based safety layer.
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
@@ -9,28 +11,20 @@ from utils import selected_features, scale_observation
 from safety_layer import verify_action, humanize_action, RaceState
 from collections import Counter
 
-# Učitaj trenirani model
-# Vidi predict_strategies.py za povijest verzija modela. v6_best je
-# checkpoint s najboljim reward/korak tijekom treninga (preporučeno umjesto
-# zadnjeg modela, koji zna biti degradiran zbog PPO nestabilnosti pred kraj).
+# Load the trained model. v6_best is the checkpoint with the best reward/step
+# during training (recommended over the final model, which can degrade due to
+# PPO instability late in training). See predict_strategies.py for the version history.
 model = PPO.load("saved_models/ppo_f1_rl_logic_v6_best.zip")
 
-# Sigurniji pristup ucitanju treniranog modela
-# from pathlib import Path
-# MODEL_PATH = Path(__file__).resolve().parent / "saved_models" / "ppo_f1_rl.zip"
-# model = PPO.load(str(MODEL_PATH))
+app = FastAPI(title="F1 RL Strategy API")
 
-# Pokreni FastAPI aplikaciju
-app = FastAPI()
-
-# === Pydantic modeli ===
+# === Pydantic models ===
 class Observation(BaseModel):
     state: List[float]
-    # Opcionalni kontekst utrke - REST poziv je bez stanja (stateless), pa
-    # pravilo "obavezna 2 tipa suhih guma" (R10) treba da mu KLIJENT (npr.
-    # main.ipynb ili predict_strategies.py) proslijedi dosadašnju povijest
-    # ove utrke. Bez ovoga R10 se jednostavno preskače za taj poziv, ostala
-    # pravila (R1-R9) rade normalno jer se oslanjaju samo na trenutni state.
+    # Optional race context. The REST call is stateless, so for rule R10
+    # (two mandatory dry compounds) the CLIENT must pass the race history so
+    # far. Without it, R10 is skipped for that call; rules R1-R9 work as usual
+    # because they rely only on the current state.
     compounds_used: Optional[List[int]] = None
     wet_or_damp_seen: Optional[bool] = None
     laps_remaining: Optional[int] = None
@@ -42,38 +36,37 @@ class ActionOutput(BaseModel):
 class BatchOutput(BaseModel):
     actions: List[List[int]]
 
-# === Pomoćna funkcija: sastavi RaceState iz opcionalnog konteksta u zahtjevu ===
+# === Helper: build a RaceState from the optional context in the request ===
 def _build_race_state(obs: "Observation") -> Optional[RaceState]:
     if obs.laps_remaining is None:
-        return None  # klijent nije poslao kontekst -> R10 se preskače za ovaj poziv
+        return None  # no context from the client -> R10 is skipped for this call
     rs = RaceState(total_laps=obs.laps_remaining + 1, force_window=3)
     rs.compounds_used = set(obs.compounds_used or [])
     rs.wet_or_damp_seen = bool(obs.wet_or_damp_seen)
     return rs
 
 
-# === Korijen aplikacije ===
+# === Root ===
 @app.get("/")
 def root():
     return {"message": "F1 RL Strategy API is running."}
 
-# === Jedan primjer predikcije ===
+# === Single prediction ===
 @app.post("/predict_strategy", response_model=ActionOutput)
 def predict_strategy(obs: Observation):
     if len(obs.state) != len(selected_features):
         raise HTTPException(
             status_code=400,
-            detail=f"Očekivano {len(selected_features)} značajki, dobijeno {len(obs.state)}"
+            detail=f"Expected {len(selected_features)} features, got {len(obs.state)}"
         )
 
     state = np.array([obs.state], dtype=np.float32)
     action, _ = model.predict(scale_observation(state), deterministic=True)
 
-    # Safety sloj - nadogradnja
     raw_action = action[0] if isinstance(action[0], (list, np.ndarray)) else action
     raw_action = np.array(raw_action, dtype=np.int32)
 
-    state_1d = state.reshape(-1)  # (n_features,) - SIROVO, za verify_action
+    state_1d = state.reshape(-1)  # (n_features,) - RAW (unscaled), for verify_action
     race_state = _build_race_state(obs)
     safe_action, report = verify_action(state_1d, raw_action, selected_features, race_state=race_state)
 
@@ -91,7 +84,7 @@ def predict_strategy(obs: Observation):
 
     return {"action": safe_action.tolist(), "explanation": explanation}
 
-# === Više primjera (batch predikcija) ===
+# === Batch prediction ===
 @app.post("/predict_strategy_batch")
 def predict_strategy_batch(batch: list[Observation]):
     if not batch:
@@ -105,9 +98,9 @@ def predict_strategy_batch(batch: list[Observation]):
     violations_count = 0
     rules_counter = Counter()
 
-    # Batch se tretira kao JEDNA sekvencijalna utrka (redoslijed iz liste = redoslijed
-    # krugova), pa R10 (obavezna 2 compounda) ovdje MOŽE raditi automatski bez
-    # dodatnog konteksta od klijenta - za razliku od pojedinačnog /predict_strategy poziva.
+    # The batch is treated as ONE sequential race (list order = lap order), so
+    # R10 (two mandatory compounds) works automatically without extra context
+    # from the client, unlike the single /predict_strategy call.
     i_weather = selected_features.index("Weather")
     race_state = RaceState(total_laps=len(batch), force_window=3)
 
@@ -115,7 +108,7 @@ def predict_strategy_batch(batch: list[Observation]):
         if len(obs.state) != len(selected_features):
             raise HTTPException(
                 status_code=400,
-                detail=f"Očekivano {len(selected_features)} značajki, dobijeno {len(obs.state)}"
+                detail=f"Expected {len(selected_features)} features, got {len(obs.state)}"
             )
 
         state = np.array([obs.state], dtype=np.float32)
@@ -161,13 +154,13 @@ def predict_strategy_batch(batch: list[Observation]):
 
     return {"summary": summary, "results": results}
 
-# === Objašnjenje strategije bez modela ===
+# === Rule-of-thumb explanation without the model ===
 @app.post("/explain_strategy")
 def explain_strategy(obs: Observation):
     if len(obs.state) != len(selected_features):
         raise HTTPException(
             status_code=400,
-            detail=f"Očekivano {len(selected_features)} značajki, dobijeno {len(obs.state)}"
+            detail=f"Expected {len(selected_features)} features, got {len(obs.state)}"
         )
 
     state = np.array(obs.state, dtype=np.float32)
@@ -181,20 +174,20 @@ def explain_strategy(obs: Observation):
     analysis = {}
 
     if tyre_life < 8:
-        analysis["pit"] = "Preporučen PIT - niska izdržljivost guma."
+        analysis["pit"] = "PIT recommended - low tyre life."
     else:
-        analysis["pit"] = "PIT nije potreban - gume još dobre."
+        analysis["pit"] = "No PIT needed - tyres are still good."
 
     if weather_temp < 20:
-        analysis["compound"] = "Niska temperatura staze - tvrđe gume bolje drže."
+        analysis["compound"] = "Low track temperature - harder tyres hold better."
     elif weather_temp > 32:
-        analysis["compound"] = "Vruća staza - soft gume brže degradiraju."
+        analysis["compound"] = "Hot track - soft tyres degrade faster."
     else:
-        analysis["compound"] = "Uvjeti srednji - MEDIUM bi mogao biti optimalan."
+        analysis["compound"] = "Moderate conditions - MEDIUM may be optimal."
 
     if front_gap < 1.5:
-        analysis["style"] = "Manji razmak - konzervativan stil za izbjegavanje sudara."
+        analysis["style"] = "Small gap - conservative style to avoid a collision."
     else:
-        analysis["style"] = "Prazniji prostor - možeš biti agresivniji."
+        analysis["style"] = "More free space - a more aggressive style is possible."
 
     return {"explanation": analysis}

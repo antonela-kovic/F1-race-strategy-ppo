@@ -1,5 +1,5 @@
-# === test_safety_layer.py ===
-# Jedinični testovi za safety_layer.py (pravila R1-R10 i RaceState). Pokreni s:
+# test_safety_layer.py
+# Unit tests for safety_layer.py (rules R1-R10 and RaceState). Run with:
 #   pytest test_safety_layer.py -v
 import numpy as np
 import pytest
@@ -15,8 +15,8 @@ SELECTED_FEATURES = [
 
 
 def make_state(**overrides):
-    """Napravi state vektor sa smislenim defaultima (suho, dobre gume,
-    normalan razmak), pa selektivno prepiši samo ono što test treba."""
+    """Build a state vector with sensible defaults (dry, good tyres, normal
+    gap), then override only what the test needs."""
     defaults = {
         "TyreLife": 15, "CompoundEncoded": 1, "LapNumber": 20, "TrackStatus": 1,
         "IsAccurate": 1, "Position": 5, "LapTime": 95.0, "Sector1Time": 30.0,
@@ -27,11 +27,11 @@ def make_state(**overrides):
     return np.array([defaults[f] for f in SELECTED_FEATURES], dtype=np.float32)
 
 
-# --- R1: kiša -> WET ---
+# --- R1: rain -> WET ---
 
 def test_r1_wet_weather_forces_wet_tyres():
     state = make_state(Weather=3)
-    action = np.array([0, 0, 0])  # SOFT na kiši - kršenje
+    action = np.array([0, 0, 0])  # SOFT in the rain - violation
     safe, report = verify_action(state, action, SELECTED_FEATURES)
     assert safe[1] == 4  # WET
     assert any(o["rule"] == "R1_WET_REQUIRES_WET" for o in report.overrides)
@@ -39,22 +39,22 @@ def test_r1_wet_weather_forces_wet_tyres():
 
 def test_r1_no_override_if_already_wet():
     state = make_state(Weather=3)
-    action = np.array([0, 4, 0])  # već WET
+    action = np.array([0, 4, 0])  # already WET
     safe, report = verify_action(state, action, SELECTED_FEATURES)
     assert safe[1] == 4
     assert not any(o["rule"] == "R1_WET_REQUIRES_WET" for o in report.overrides)
 
 
-# --- R2: vlaga -> INTER ---
+# --- R2: damp -> INTER ---
 
 def test_r2_damp_weather_forces_inter():
     state = make_state(Weather=2)
-    action = np.array([0, 1, 0])  # MEDIUM na vlažnom - kršenje
+    action = np.array([0, 1, 0])  # MEDIUM on a damp track - violation
     safe, report = verify_action(state, action, SELECTED_FEATURES)
     assert safe[1] == 3  # INTER
 
 
-# --- R3a: suho zabranjuje INTER/WET ---
+# --- R3a: dry forbids INTER/WET ---
 
 @pytest.mark.parametrize("bad_compound", [3, 4])
 def test_r3a_dry_forbids_wet_compounds(bad_compound):
@@ -70,10 +70,10 @@ def test_r3a_allows_all_dry_compounds_unchanged():
         state = make_state(Weather=1)
         action = np.array([0, comp, 0])
         safe, _ = verify_action(state, action, SELECTED_FEATURES)
-        assert safe[1] == comp  # R3b je uklonjen - HARD se više NE prepisuje
+        assert safe[1] == comp  # HARD is not rewritten on a dry track
 
 
-# --- R4: kritično niske gume prisiljavaju pit ---
+# --- R4: critically low tyre life forces a pit ---
 
 def test_r4_forces_pit_when_tyres_critical():
     state = make_state(TyreLife=1.0)
@@ -83,7 +83,7 @@ def test_r4_forces_pit_when_tyres_critical():
     assert any(o["rule"] == "R4_LOW_TYRE_FORCES_PIT" for o in report.overrides)
 
 
-# --- R5: blokiraj besmislen pit na suhom s dobrim gumama ---
+# --- R5: block a pointless pit on a dry track with good tyres ---
 
 def test_r5_blocks_pointless_pit():
     state = make_state(Weather=1, TyreLife=35.0)
@@ -93,7 +93,7 @@ def test_r5_blocks_pointless_pit():
     assert any(o["rule"] == "R5_BLOCK_POINTLESS_PIT" for o in report.overrides)
 
 
-# --- R6: mokro/vlažno zabranjuje agresivan stil ---
+# --- R6: wet/damp forbids an aggressive style ---
 
 @pytest.mark.parametrize("weather", [2, 3])
 def test_r6_wet_or_damp_forbids_aggressive(weather):
@@ -104,7 +104,7 @@ def test_r6_wet_or_damp_forbids_aggressive(weather):
     assert any(o["rule"] == "R6_WET_AVOIDS_AGGRESSIVE" for o in report.overrides)
 
 
-# --- R7: mali razmak -> konzervativno ---
+# --- R7: small gap -> conservative ---
 
 def test_r7_small_gap_forces_conservative():
     state = make_state(FrontGap=0.5)
@@ -114,11 +114,11 @@ def test_r7_small_gap_forces_conservative():
     assert any(o["rule"] == "R7_SMALL_GAP_CONSERVATIVE" for o in report.overrides)
 
 
-# --- R9: Safety Car/VSC/crveni/žuti zabranjuju agresivan stil ---
+# --- R9: Safety Car/VSC/red/yellow forbid an aggressive style ---
 
 @pytest.mark.parametrize("track_status", [2, 4, 5, 6, 7])
 def test_r9_caution_forbids_aggressive(track_status):
-    state = make_state(TrackStatus=track_status, FrontGap=3.0)  # dovoljan gap da R7 ne interferira
+    state = make_state(TrackStatus=track_status, FrontGap=3.0)  # gap large enough that R7 does not interfere
     action = np.array([0, 1, 2])
     safe, report = verify_action(state, action, SELECTED_FEATURES)
     assert safe[2] == 0
@@ -133,20 +133,20 @@ def test_r9_clear_track_allows_aggressive():
     assert not any(o["rule"] == "R9_CAUTION_FORBIDS_AGGRESSIVE" for o in report.overrides)
 
 
-# --- R10: obavezna 2 tipa suhih guma po suhoj utrci ---
+# --- R10: two mandatory dry compounds in a dry race ---
 
 def test_r10_forces_pit_and_compound_change_near_race_end():
     race_state = RaceState(total_laps=50, force_window=3)
     for _ in range(47):
-        race_state.record(weather=1, compound=1)  # cijelu utrku samo MEDIUM
+        race_state.record(weather=1, compound=1)  # MEDIUM only for the whole race
     assert race_state.laps_remaining == 2
 
-    state = make_state(Weather=1, TyreLife=20.0)  # gume OK, agent ne bi normalno pitao
-    action = np.array([0, 1, 0])  # ostaje na istom compoundu, bez pita
+    state = make_state(Weather=1, TyreLife=20.0)  # tyres OK, the agent would normally not pit
+    action = np.array([0, 1, 0])  # stays on the same compound, no pit
     safe, report = verify_action(state, action, SELECTED_FEATURES, race_state=race_state)
 
-    assert safe[0] == 1  # prisiljen pit
-    assert safe[1] != 1  # prisiljena promjena compounda
+    assert safe[0] == 1  # pit forced
+    assert safe[1] != 1  # compound change forced
     assert any(o["rule"] == "R10_MANDATORY_TWO_DRY_COMPOUNDS" for o in report.overrides)
 
 
@@ -154,7 +154,7 @@ def test_r10_not_triggered_if_race_was_ever_wet():
     race_state = RaceState(total_laps=50, force_window=3)
     for _ in range(20):
         race_state.record(weather=1, compound=1)
-    race_state.record(weather=3, compound=4)  # kiša negdje usred utrke
+    race_state.record(weather=3, compound=4)  # rain somewhere in the middle of the race
     for _ in range(26):
         race_state.record(weather=1, compound=1)
 
@@ -162,7 +162,7 @@ def test_r10_not_triggered_if_race_was_ever_wet():
     action = np.array([0, 1, 0])
     safe, report = verify_action(state, action, SELECTED_FEATURES, race_state=race_state)
 
-    assert safe[0] == 0  # NIJE prisiljen pit - utrka se računa kao "mokra"
+    assert safe[0] == 0  # no forced pit - the race counts as a "wet race"
     assert not any(o["rule"] == "R10_MANDATORY_TWO_DRY_COMPOUNDS" for o in report.overrides)
 
 
@@ -171,7 +171,7 @@ def test_r10_not_triggered_when_two_compounds_already_used():
     for _ in range(20):
         race_state.record(weather=1, compound=0)
     for _ in range(25):
-        race_state.record(weather=1, compound=1)  # već 2 različita compounda
+        race_state.record(weather=1, compound=1)  # already two different compounds
 
     state = make_state(Weather=1, TyreLife=20.0)
     action = np.array([0, 1, 0])
@@ -181,15 +181,15 @@ def test_r10_not_triggered_when_two_compounds_already_used():
 
 
 def test_r10_skipped_entirely_without_race_state():
-    # Bez race_state (npr. jednokratni API poziv bez konteksta), R10 se
-    # jednostavno preskače umjesto da pukne.
+    # Without race_state (e.g. a single API call without context), R10 is
+    # skipped instead of failing.
     state = make_state(Weather=1, TyreLife=20.0)
     action = np.array([0, 1, 0])
     safe, report = verify_action(state, action, SELECTED_FEATURES, race_state=None)
     assert not any(o["rule"] == "R10_MANDATORY_TWO_DRY_COMPOUNDS" for o in report.overrides)
 
 
-# --- RaceState svojstva ---
+# --- RaceState properties ---
 
 def test_race_state_laps_remaining():
     rs = RaceState(total_laps=10)
@@ -201,7 +201,7 @@ def test_race_state_laps_remaining():
 def test_race_state_dry_compounds_used_excludes_wet_inter():
     rs = RaceState(total_laps=10)
     rs.record(weather=1, compound=0)
-    rs.record(weather=3, compound=4)  # WET ne broji se kao "suhi" compound
+    rs.record(weather=3, compound=4)  # WET does not count as a dry compound
     assert rs.dry_compounds_used == {0}
 
 
@@ -216,6 +216,6 @@ def test_race_state_is_dry_race_so_far():
 
 def test_humanize_action_readable_output():
     result = humanize_action(np.array([1, 4, 2]))
-    assert result["pit"] == "DA"
+    assert result["pit"] == "YES"
     assert "WET" in result["compound"]
-    assert "Agresivno" in result["style"]
+    assert "Aggressive" in result["style"]

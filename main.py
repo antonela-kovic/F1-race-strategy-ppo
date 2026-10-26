@@ -1,18 +1,18 @@
+# main.py
+# Runs the full pipeline: data preparation, training and the REST API.
 import subprocess
-import os
-import time
 
-# 1. Priprema podataka
-print("Pokrećem pripremu podataka...")
+# 1. Data preparation
+print("Preparing data...")
 subprocess.run(["python", "prepare_data.py"], check=True)
 
-# 2. Treniranje modela
-print("Pokrećem treniranje agenta...")
+# 2. Model training
+print("Training the agent...")
 subprocess.run(["python", "train.py"], check=True)
 
-# 3. Pokretanje REST API-ja
-print("Pokrećem REST API (CTRL+C za izlaz)...")
+# 3. REST API
+print("Starting the REST API (CTRL+C to stop)...")
 try:
     subprocess.run(["uvicorn", "api:app", "--reload"])
 except KeyboardInterrupt:
-    print("\nAPI ručno zaustavljen.")
+    print("\nAPI stopped manually.")

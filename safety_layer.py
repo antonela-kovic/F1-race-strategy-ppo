@@ -1,34 +1,37 @@
 # safety_layer.py
+# Rule-based safety layer: verifies every action proposed by the PPO policy
+# against explicit race-strategy rules (R1-R10) and overrides it when a rule
+# is violated. Every override records the rule and the reason.
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Any, Optional, Set
 import numpy as np
 
-# Compound mapping (iz tvog projekta)
+# Compound mapping
 # 0 SOFT, 1 MEDIUM, 2 HARD, 3 INTER, 4 WET
 COMPOUND_NAMES = {0: "SOFT", 1: "MEDIUM", 2: "HARD", 3: "INTER", 4: "WET"}
-STYLE_NAMES = {0: "Konzervativno", 1: "Neutralno", 2: "Agresivno"}
+STYLE_NAMES = {0: "Conservative", 1: "Neutral", 2: "Aggressive"}
 DRY_COMPOUNDS = (0, 1, 2)  # SOFT, MEDIUM, HARD
 
-# FastF1 TrackStatus kodovi: 1=čisto, 2=žuti, 3=nekorišteno, 4=Safety Car,
-# 5=crveni, 6=VSC, 7=kraj VSC-a
+# FastF1 TrackStatus codes: 1=clear, 2=yellow, 3=unused, 4=Safety Car,
+# 5=red, 6=VSC, 7=VSC ending
 CAUTION_STATUSES = {2, 4, 5, 6, 7}
 
 
 @dataclass
 class RaceState:
     """
-    Pamti kontekst na razini CIJELE utrke/epizode (a ne samo trenutnog kruga),
-    potrebno za pravila koja se ne mogu provjeriti iz jednog reda stanja
-    (npr. "obavezna 2 tipa suhih guma po suhoj utrci").
+    Keeps context for the WHOLE race/episode (not only the current lap),
+    required by rules that cannot be checked from a single state row
+    (e.g. "two dry compounds are mandatory in a dry race").
 
-    Poziv: nakon svakog kruga, kad je SAFE akcija poznata, pozovi
-    `race_state.record(weather, safe_compound)` da se povijest ažurira.
+    Usage: after every lap, once the SAFE action is known, call
+    `race_state.record(weather, safe_compound)` to update the history.
     """
     total_laps: int
     lap_index: int = 0
     compounds_used: Set[int] = field(default_factory=set)
     wet_or_damp_seen: bool = False
-    force_window: int = 3  # koliko krugova prije kraja prisiljavamo promjenu
+    force_window: int = 3  # how many laps before the end the compound change is forced
 
     @property
     def laps_remaining(self) -> int:
@@ -36,7 +39,7 @@ class RaceState:
 
     @property
     def is_dry_race_so_far(self) -> bool:
-        # Pravilo o 2 compounda ne vrijedi ako je utrka (ili dio nje) proglašena mokrom
+        # The two-compound rule does not apply if the race (or part of it) was declared wet
         return not self.wet_or_damp_seen
 
     @property
@@ -69,18 +72,17 @@ def verify_action(
     """
     state: shape (n_features,)
     action: shape (3,) -> [pit, compound, style]
-    race_state: opcionalno - kontekst cijele utrke (povijest guma, broj krugova
-        do kraja). Bez njega, R9 (safety car/VSC) i dalje rade jer se oslanjaju
-        samo na trenutni state, ali R10 (obavezna 2 compounda) se preskače jer
-        je po definiciji nemoguće provjeriti bez povijesti prijašnjih krugova.
+    race_state: optional whole-race context (tyre history, laps remaining).
+        Without it, R9 (Safety Car/VSC) still works because it relies only on
+        the current state, but R10 (two mandatory dry compounds) is skipped
+        because it cannot be checked without the history of previous laps.
     """
     if config is None:
         config = {
-            # "tyre_pit_force": 5.0,   # ispod ove vrijednosti forsiraj pit
-            # "tyre_pit_block": 15.0,  # iznad ove vrijednosti blokiraj pit u suhim uvjetima
-            # Izmjena zbog narušavanja tocnosti pit stopa
-            "tyre_pit_force": 2.0,     # samo kad je baš kritično
-            "tyre_pit_block": 30.0,    # blokiraj pit samo kad su gume jako dobre
+            # Thresholds were relaxed (from 5.0 / 15.0) because stricter values
+            # overrode too many correct pit decisions and reduced pit accuracy.
+            "tyre_pit_force": 2.0,     # force a pit only when tyre life is critical
+            "tyre_pit_block": 30.0,    # block a pit only when the tyres are very good
         }
 
     # ensure types
@@ -107,49 +109,41 @@ def verify_action(
     def override(field: str, old: int, new: int, rule: str, why: str):
         overrides.append({"field": field, "from": old, "to": new, "rule": rule, "why": why})
 
-    # ==== RULES (minimalni, obrambeni set) ====
+    # ==== RULES (minimal, defensive set) ====
 
     # R1: Wet => WET tyres
     if wet:
         triggered.append("R1_WET_REQUIRES_WET")
         if comp != 4:
-            violations.append("R1: Weather=kiša -> compound mora biti WET(4)")
-            override("compound", comp, 4, "R1_WET_REQUIRES_WET", "Kiša: WET je obavezno")
+            violations.append("R1: Weather=rain -> compound must be WET(4)")
+            override("compound", comp, 4, "R1_WET_REQUIRES_WET", "Rain: WET is mandatory")
             comp = 4
 
-    # R2: Damp => INTER preferred (soft rule but we enforce in prototype)
     # R2: Damp => INTER tyres (enforced)
     if damp:
         triggered.append("R2_DAMP_REQUIRES_INTER")
         if comp != 3:
-            violations.append("R2: Weather=mokro -> compound mora biti INTER(3)")
-            override("compound", comp, 3, "R2_DAMP_REQUIRES_INTER", "Mokro: INTER je obavezno")
+            violations.append("R2: Weather=damp -> compound must be INTER(3)")
+            override("compound", comp, 3, "R2_DAMP_REQUIRES_INTER", "Damp: INTER is mandatory")
             comp = 3
 
     # R3: Dry => forbid INTER/WET
     if dry:
         triggered.append("R3_DRY_RULES")
-        # forbid INTER/WET
         if comp in (3, 4):
-            violations.append("R3a: Suho -> INTER/WET nisu dozvoljeni")
-            override("compound", comp, 1, "R3a_DRY_FORBIDS_INTER_WET", "Suho: prebacujem na MEDIUM")
+            violations.append("R3a: Dry -> INTER/WET are not allowed")
+            override("compound", comp, 1, "R3a_DRY_FORBIDS_INTER_WET", "Dry: switching to MEDIUM")
             comp = 1
-
-        # NAPOMENA: ovdje je ranije postojalo R3b - "meko" prepisivanje SVAKOG
-        # HARD(2) izbora u SOFT/MEDIUM na temelju praga temperature staze.
-        # Uklonjeno je jer NIJE stvarno FIA pravilo (za razliku od R3a) - bila
-        # je to ad-hoc heuristika iz faze kad je RAW politika bila zaglavljena
-        # i rijetko birala HARD. Otkad RAW politika stvarno uči birati HARD u
-        # skladu sa stvarnom vozačevom strategijom (HARD se koristi 223 puta u
-        # stvarnim podacima - usporedivo s MEDIUM/SOFT), ovo pravilo je
-        # aktivno brisalo taj naučeni signal i vraćalo SAFE izlaz na lošiju,
-        # manje točnu procjenu nego sam RAW izlaz.
+        # Note: there is intentionally no rule that rewrites HARD choices on a
+        # dry track. It is not an FIA rule, and HARD is used as often as
+        # MEDIUM/SOFT in the real data, so such a rule would erase a correctly
+        # learned signal.
 
     # R4: Very low tyre life => force PIT
     triggered.append("R4_LOW_TYRE_FORCES_PIT")
     if tyre_life < config["tyre_pit_force"]:
         if pit != 1:
-            violations.append("R4: TyreLife jako nizak -> PIT mora biti 1")
+            violations.append("R4: TyreLife very low -> PIT must be 1")
             override("pit", pit, 1, "R4_LOW_TYRE_FORCES_PIT", f"TyreLife={tyre_life:.1f} < {config['tyre_pit_force']}")
             pit = 1
 
@@ -157,26 +151,25 @@ def verify_action(
     triggered.append("R5_BLOCK_POINTLESS_PIT")
     if dry and tyre_life > config["tyre_pit_block"]:
         if pit != 0:
-            violations.append("R5: Suho + dobre gume -> PIT treba biti 0")
-            override("pit", pit, 0, "R5_BLOCK_POINTLESS_PIT", f"TyreLife={tyre_life:.1f} > {config['tyre_pit_block']} i suho")
+            violations.append("R5: Dry + good tyres -> PIT should be 0")
+            override("pit", pit, 0, "R5_BLOCK_POINTLESS_PIT", f"TyreLife={tyre_life:.1f} > {config['tyre_pit_block']} and dry")
             pit = 0
 
     # R6: Wet/damp -> avoid aggressive style
-        # R6: Wet/damp -> avoid aggressive style
     triggered.append("R6_WET_AVOIDS_AGGRESSIVE")
     if (wet or damp) and style == 2:
-        violations.append("R6: Mokro/kiša -> agresivan stil nije dopušten (sigurnost)")
-        override("style", style, 1, "R6_WET_AVOIDS_AGGRESSIVE", "Smanjujem rizik na mokrom")
+        violations.append("R6: Damp/rain -> aggressive style is not allowed (safety)")
+        override("style", style, 1, "R6_WET_AVOIDS_AGGRESSIVE", "Reducing risk on a wet track")
         style = 1
 
-    # Front gap (treba biti definiran neovisno o R6)
+    # Front gap (must be defined independently of R6)
     i_front = _idx(selected_features, "FrontGap")
     front_gap = float(s[i_front])
 
     # R7: small gap -> conservative
     triggered.append("R7_SMALL_GAP_CONSERVATIVE")
     if front_gap < 1.5 and style != 0:
-        violations.append("R7: Mali front gap -> preferiraj konzervativno")
+        violations.append("R7: Small front gap -> prefer conservative")
         override("style", style, 0, "R7_SMALL_GAP_CONSERVATIVE", f"FrontGap={front_gap:.2f} < 1.5")
         style = 0
 
@@ -186,8 +179,9 @@ def verify_action(
         override("style", style, 1, "R8_BIG_GAP_DRY_MORE_AGGRESSIVE", f"FrontGap={front_gap:.2f} > 2.5")
         style = 1
 
-    # R9: Safety Car / VSC / crveni / žuti -> pretjecanje je zabranjeno pravilnikom,
-    # pa agresivan stil (koji ima smisla samo uz pokušaj pretjecanja) nije dopušten.
+    # R9: Safety Car / VSC / red / yellow -> overtaking is forbidden by the
+    # regulations, so an aggressive style (which only makes sense when trying
+    # to overtake) is not allowed.
     if "TrackStatus" in selected_features:
         i_track = _idx(selected_features, "TrackStatus")
         track_status = int(round(float(s[i_track])))
@@ -196,50 +190,50 @@ def verify_action(
         triggered.append("R9_CAUTION_FORBIDS_AGGRESSIVE")
         if caution and style == 2:
             violations.append(
-                f"R9: TrackStatus={track_status} (SC/VSC/crveni/žuti) -> pretjecanje zabranjeno, agresivan stil nije dopušten"
+                f"R9: TrackStatus={track_status} (SC/VSC/red/yellow) -> no overtaking, aggressive style is not allowed"
             )
             override("style", style, 0, "R9_CAUTION_FORBIDS_AGGRESSIVE",
-                      f"TrackStatus={track_status}: nema pretjecanja pod caution uvjetima")
+                      f"TrackStatus={track_status}: no overtaking under caution")
             style = 0
 
-    # R10: Obavezna upotreba barem 2 različita tipa SUHIH guma tijekom suhe utrke
-    # (FIA Sporting Regulations, čl. 30/33). Pravilo se ne primjenjuje ako je
-    # tijekom utrke ikad bilo mokro/vlažno (tada je utrka "wet race").
-    # Ovo pravilo se NE MOŽE provjeriti iz jednog kruga - zahtijeva race_state.
+    # R10: At least two different DRY compounds must be used during a dry race
+    # (FIA Sporting Regulations). The rule does not apply if the race was ever
+    # wet/damp (it is then a "wet race").
+    # This rule CANNOT be checked from a single lap and requires race_state.
     if race_state is not None:
         triggered.append("R10_MANDATORY_TWO_DRY_COMPOUNDS")
 
-        # compound koji bi bio primijenjen NAKON svih dosadašnjih override-a
+        # compound that would be applied AFTER all previous overrides
         prospective_dry_used = race_state.dry_compounds_used | ({comp} if comp in DRY_COMPOUNDS else set())
 
         if (
             race_state.is_dry_race_so_far
-            and dry  # trenutni krug je i dalje suh
+            and dry  # the current lap is still dry
             and len(prospective_dry_used) < 2
             and race_state.laps_remaining <= race_state.force_window
         ):
-            # prisili pit stop ako ga agent ne bi napravio
+            # force a pit stop if the agent would not make one
             if pit != 1:
                 violations.append(
-                    "R10a: Do kraja utrke korišten je samo 1 tip suhih guma -> PIT mora biti 1"
+                    "R10a: Only one dry compound used so far near the end of the race -> PIT must be 1"
                 )
                 override("pit", pit, 1, "R10_MANDATORY_TWO_DRY_COMPOUNDS",
                           f"LapsRemaining={race_state.laps_remaining} <= {race_state.force_window}, "
                           f"dry_compounds_used={sorted(race_state.dry_compounds_used)}")
                 pit = 1
 
-            # prisili odabir DRUGOG tipa suhe gume (ne onog koji je već korišten)
+            # force a DIFFERENT dry compound (not the one already used)
             already_used = race_state.dry_compounds_used
             if comp in already_used or not already_used:
                 candidates = [c for c in DRY_COMPOUNDS if c not in already_used]
                 new_comp = candidates[0] if candidates else comp
                 if new_comp != comp:
                     violations.append(
-                        f"R10b: Compound={COMPOUND_NAMES.get(comp)} je već korišten cijelu utrku -> "
-                        f"obavezna promjena na drugi suhi tip"
+                        f"R10b: Compound={COMPOUND_NAMES.get(comp)} has been used for the whole race -> "
+                        f"a change to another dry compound is mandatory"
                     )
                     override("compound", comp, new_comp, "R10_MANDATORY_TWO_DRY_COMPOUNDS",
-                              f"Dosad korišteno: {sorted(already_used) if already_used else 'ništa (prvi pit)'}")
+                              f"Used so far: {sorted(already_used) if already_used else 'none (first pit)'}")
                     comp = new_comp
 
     safe_action = np.array([pit, comp, style], dtype=np.int32)
@@ -254,7 +248,7 @@ def verify_action(
 def humanize_action(action: np.ndarray) -> Dict[str, str]:
     pit, comp, style = int(action[0]), int(action[1]), int(action[2])
     return {
-        "pit": "DA" if pit == 1 else "NE",
+        "pit": "YES" if pit == 1 else "NO",
         "compound": f"{comp} ({COMPOUND_NAMES.get(comp, 'UNKNOWN')})",
         "style": f"{style} ({STYLE_NAMES.get(style, 'UNKNOWN')})",
     }

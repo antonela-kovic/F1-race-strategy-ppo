@@ -1,5 +1,5 @@
-# === test_utils.py ===
-# Jedinični testovi za čiste pomoćne funkcije u utils.py. Pokreni s:
+# test_utils.py
+# Unit tests for the pure helper functions in utils.py. Run with:
 #   pytest test_utils.py -v
 import numpy as np
 import pytest
@@ -21,8 +21,8 @@ def test_classify_weather_all_dry():
 
 
 def test_classify_weather_rain_then_damp_then_dry():
-    # kiša 2 kruga, pa 3 kruga "pamćenja" vlage (damp_memory_laps=3 default),
-    # pa natrag na suho
+    # rain for 2 laps, then 3 laps of damp "memory" (damp_memory_laps=3 default),
+    # then back to dry
     rainfall = [False, True, True, False, False, False, False]
     result = classify_weather(rainfall, damp_memory_laps=3)
     assert result == [1, 3, 3, 2, 2, 2, 1]
@@ -41,21 +41,21 @@ def test_classify_weather_empty_input():
 # --- worst_track_status ---
 
 @pytest.mark.parametrize("raw,expected", [
-    ("1", 1),      # čisto
-    ("2", 2),      # žuti
+    ("1", 1),      # clear
+    ("2", 2),      # yellow
     ("4", 4),      # Safety Car
-    ("41", 4),     # SC ima prednost nad "čisto"
-    ("126", 6),    # VSC(6) ima prednost nad žutim(2) i čistim(1)
-    ("1264", 4),   # Safety Car ima prednost nad svim ostalim prisutnim
-    ("", 1),       # prazan string -> tretiraj kao čisto
-    ("9", 1),      # nepoznat kod -> tretiraj kao čisto
+    ("41", 4),     # SC takes priority over "clear"
+    ("126", 6),    # VSC(6) takes priority over yellow(2) and clear(1)
+    ("1264", 4),   # Safety Car takes priority over all other present codes
+    ("", 1),       # empty string -> treat as clear
+    ("9", 1),      # unknown code -> treat as clear
 ])
 def test_worst_track_status(raw, expected):
     assert worst_track_status(raw) == expected
 
 
 def test_worst_track_status_priority_order_is_red_first():
-    # Crveni (5) mora imati prednost nad svima, uključujući Safety Car (4)
+    # Red (5) must take priority over everything, including Safety Car (4)
     assert worst_track_status("45") == 5
     assert STATUS_PRIORITY[0] == 5
 
@@ -63,8 +63,8 @@ def test_worst_track_status_priority_order_is_red_first():
 # --- COMPOUND_TO_CODE ---
 
 def test_compound_to_code_matches_action_space_convention():
-    # Ova konvencija MORA se poklapati s onom u safety_layer.py
-    # (COMPOUND_NAMES) i s akcijskim prostorom agenta (f1_env.py)
+    # This convention MUST match safety_layer.py (COMPOUND_NAMES)
+    # and the agent's action space (f1_env.py)
     assert COMPOUND_TO_CODE == {
         "SOFT": 0, "MEDIUM": 1, "HARD": 2, "INTERMEDIATE": 3, "WET": 4
     }
@@ -85,9 +85,9 @@ def test_scale_observation_shape_preserved_2d():
 
 
 def test_scale_observation_known_values_land_in_reasonable_range():
-    # Realni raspon vrijednosti (vidi FEATURE_SCALE u utils.py) - nakon
-    # skaliranja sve bi trebalo biti otprilike u [0, 1.6], ne u stotinama
-    # kao sirove vrijednosti (npr. LapTime~90-150).
+    # Realistic value ranges (see FEATURE_SCALE in utils.py): after scaling,
+    # everything should be roughly in [0, 1.6], not in the hundreds like the
+    # raw values (e.g. LapTime ~90-150).
     row = np.array([
         20,    # TyreLife
         1,     # CompoundEncoded

@@ -1,4 +1,4 @@
-# Virtualno okruženje - regenerira se s: pip install -r requirements.txt
+# Virtual environment (recreate with: pip install -r requirements.txt)
 venv/
 .venv/
 env/
@@ -8,15 +8,15 @@ __pycache__/
 *.pyc
 *.pyo
 
-# FastF1 cache - regenerira se automatski pri pokretanju prepare_data.py
+# FastF1 cache (regenerated automatically by prepare_data.py)
 data/cache/
 
-# Generirani podaci (regeneriraju se s prepare_data.py) - zadrži ako želiš
-# da netko odmah može trenirati bez FastF1 API poziva, inače otkomentiraj:
+# Generated data is committed on purpose, so the agent can be trained and
+# evaluated without FastF1 network calls. To stop tracking it, uncomment:
 # data/*.npy
 # data/*.csv
 
-# Bilježnice - checkpointi
+# Jupyter checkpoints
 .ipynb_checkpoints/
 
 # OS/editor

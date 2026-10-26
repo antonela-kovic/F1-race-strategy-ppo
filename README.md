@@ -1,180 +1,217 @@
-# F1 RL Agent – PPO Strategija
+# F1 Race Strategy Agent – PPO with a Rule-Based Safety Layer
 
-Ovaj projekt koristi PPO (Proximal Policy Optimization) za treniranje agenta koji optimizira strategiju utrkivanja (pit stop, izbor guma, stil vožnje) koristeći stvarne podatke iz FastF1 biblioteke.
+A reinforcement learning agent that makes Formula 1 race-strategy decisions – **pit stop, tyre compound and driving style** – on every lap. It is trained with **Proximal Policy Optimization (PPO)** on real lap data from the [FastF1](https://github.com/theOehrly/Fast-F1) library, and every decision is checked by an explicit **rule-based safety layer** that enforces race regulations and records which rule fired and why. The model is served through a **FastAPI** REST API.
+
+The project combines a learned policy with verifiable rules: the policy proposes, the rules check. This pattern is common in safety-relevant automotive software, where a learned component must stay inside explicit constraints.
 
 ---
 
-## KORACI ZA POKRETANJE
+## At a glance
 
-### 1. Priprema i treniranje agenta
-
-```bash
-python prepare_data.py        # Generira podatke za treniranje (više vozača i trka)
-python train.py               # Pokreće PPO treniranje s curriculum logikom
+```mermaid
+flowchart LR
+    D[(FastF1 lap and<br/>weather data)] --> P[prepare_data.py<br/>features + ground truth]
+    P --> E[F1 Gym environment<br/>reward, curriculum,<br/>synthetic rain / SC]
+    E --> T[PPO training<br/>MLP 256-128-64]
+    T --> M[Trained policy]
+    M -->|RAW action| S[Safety layer<br/>rules R1-R10]
+    S -->|SAFE action +<br/>explanation| A[FastAPI REST API]
 ```
 
-> Koriste se podaci iz trka: Silverstone, Monza, Spa (2023), vozači: VER, HAM, LEC, PER
+| Component | What it does |
+|---|---|
+| `prepare_data.py` | Downloads 2023 races (Silverstone, Monza, Spa) for four drivers (VER, HAM, LEC, PER), joins real weather data and builds observations and ground-truth actions |
+| `f1_env.py` | Gym environment with a shaped reward, a three-level curriculum and block-wise synthetic rain/damp and Safety Car/VSC scenarios |
+| `train.py` | PPO training (Stable-Baselines3), keeps the best checkpoint by reward per step |
+| `safety_layer.py` | Ten named rules (wet tyres in rain, no aggressive style under Safety Car, two mandatory dry compounds, …) that override unsafe actions and explain every override |
+| `api.py` | REST API: single prediction, batch prediction over a race, rule-based explanation |
+| `predict_strategies.py` | Offline evaluation: RAW policy vs SAFE (policy + rules) against the real drivers' decisions |
+
+### Action space
+
+| Action | Values |
+|---|---|
+| Pit stop | 0 = stay out, 1 = pit |
+| Compound | 0 SOFT, 1 MEDIUM, 2 HARD, 3 INTER, 4 WET |
+| Driving style | 0 conservative, 1 neutral, 2 aggressive |
+
+### Safety layer rules
+
+| Rule | Condition | Effect |
+|---|---|---|
+| R1 | rain | compound must be WET |
+| R2 | damp track | compound must be INTER |
+| R3a | dry track | INTER/WET not allowed |
+| R4 | critically low tyre life | pit is forced |
+| R5 | dry track, tyres in very good condition | pointless pit is blocked |
+| R6 | wet or damp track | no aggressive style |
+| R7 | small gap to the car ahead | conservative style |
+| R8 | large gap on a dry track | conservative style relaxed to neutral |
+| R9 | Safety Car / VSC / red / yellow flag | no aggressive style (overtaking forbidden) |
+| R10 | dry race, only one dry compound used near the end | pit and compound change are forced (FIA rule) |
 
 ---
 
-### 2. Pokretanje REST API-ja
+## Results
 
-U korijenskom direktoriju pokreni FastAPI:
+Evaluation on all 674 laps of the dataset (12 driver–race combinations), SAFE = policy + safety layer:
+
+| Decision | SAFE accuracy | Majority-class baseline |
+|---|---|---|
+| Compound | 69.6 % | 43.9 % |
+| Driving style | 64.2 % | 42.1 % |
+| Pit stop | 92.7 % (recall 88 %, precision 24 %) | 97.5 % (never pit) |
+
+Pit stops happen on only ~2.5 % of laps, so accuracy is not a meaningful metric for them: a model that never pits reaches 97.5 %. The agent catches 15 of the 17 real pit stops (recall 88 %) at the cost of false alarms (it pits on ~9 % of laps). The asymmetric pit reward in `f1_env.py` is tuned for this trade-off.
+
+> These numbers are measured on the same races the agent was trained on. An evaluation on held-out races is listed under [Known limitations](#known-limitations).
+
+<!-- TODO: add training and evaluation plots, e.g. docs/reward_curve.png and docs/raw_vs_safe.png -->
+
+---
+
+## Prerequisites
+
+- Python 3.10 or newer
+- Internet access the first time `prepare_data.py` runs (FastF1 downloads and caches the data)
+
+The trained models (`saved_models/`) and the prepared data (`data/`) are committed, so the API and the evaluation can run without retraining.
+
+## Installation
+
+```bash
+git clone https://github.com/antonela-kovic/f1-race-strategy-ppo.git
+cd f1-race-strategy-ppo
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+`requirements.txt` includes `gym` and `shimmy`, because the environment uses the older `gym` API together with a newer `stable-baselines3`.
+
+## Usage
+
+### 1. Prepare data and train (optional)
+
+```bash
+python prepare_data.py   # downloads races and builds data/obs_array.npy, data/true_actions.npy
+python train.py          # PPO training with curriculum, saves saved_models/*_best.zip
+```
+
+### 2. Evaluate
+
+```bash
+python predict_strategies.py
+```
+
+Prints RAW vs SAFE accuracy, the safety-layer override rate per field and the R10 check per race. The same evaluation is available interactively in `main.ipynb`.
+
+### 3. Run the REST API
 
 ```bash
 uvicorn api:app --reload
 ```
 
-Alternativa:
+- API: http://127.0.0.1:8000
+- Swagger UI: http://127.0.0.1:8000/docs
 
-```bash
-python -m uvicorn api:app --reload
-```
+| Endpoint | Description |
+|---|---|
+| `GET /` | Health check |
+| `POST /predict_strategy` | Strategy for a single lap state |
+| `POST /predict_strategy_batch` | Strategy for a sequence of laps, treated as one race (R10 is checked automatically) |
+| `POST /explain_strategy` | Rule-of-thumb explanation of a state, without the model |
 
-* API dostupan na: [http://127.0.0.1:8000](http://127.0.0.1:8000)
-* Swagger sučelje: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+The state is a list of 15 features in this order: `TyreLife, CompoundEncoded, LapNumber, TrackStatus, IsAccurate, Position, LapTime, Sector1Time, Sector2Time, FrontGap, RearGap, Stint, TrackTemperature, AirTemperature, Weather`.
 
----
-
-### 3. Evaluacija i testiranje
-
-#### U VS Code
-
-* Otvori `main.ipynb` i izvrši sve ćelije (`Shift + Enter`)
-* Provjeri točnost agenta i ponašanje po tipu vremena
-
-#### Alternativa (Jupyter)
-
-```bash
-jupyter notebook
-```
-
-Zatim otvori `main.ipynb`.
-
----
-
-## Funkcionalnosti
-
-*  Višestazni podaci i više vozača
-*  Imitacija ljudskih odluka (PIT, compound, stil)
-*  Vremenski uvjeti: suho, mokro, kiša
-*  Curriculum težina (easy → medium → full)
-*  REST API s objašnjenjima odluka
-*  Vizualizacije:
-
-  * Reward po epizodi (smoothed)
-  * Agent vs Vozač ponašanje
-  * Reward po vremenskim uvjetima
-  * Distribucija guma
-
----
-
-## Evaluacija agenta
-
-U `main.ipynb` dostupni su grafovi i točnost predikcije:
-
-* `Točnost izbora PIT-a`
-* `Točnost izbora GUMA`
-* `Točnost STILA vožnje`
-* Interpretacija akcije (npr. "PIT: DA, Gume: Inter, Stil: Štedljivo")
-
----
-
-## REST API endpointi
-
-| Endpoint                       | Opis                                              |
-| ------------------------------ | ------------------------------------------------- |
-| `GET /`                        | Test da je server pokrenut                        |
-| `POST /predict_strategy`       | Predikcija strategije za jedno stanje             |
-| `POST /predict_strategy_batch` | Predikcija strategije za više stanja (lista dict) |
-| `POST /explain_strategy`       | Objašnjenje strategije na temelju ulaznog stanja  |
-
-> Napomena: za `batch`, očekuje se: `[{"state": [...]}, {"state": [...]}]`
-
-Primjeri za testiranje u Swagger sučelju (`/docs`), za `POST /predict_strategy`:
+Example request for `POST /predict_strategy`:
 
 ```json
-// 1. Suha staza, dobre gume
+{"state": [5, 2, 22, 2, 1, 8, 100.5, 35.0, 34.0, 0.5, 1.0, 2, 23.0, 18.0, 2]}
+```
+
+More examples:
+
+```json
+// Dry track, tyres in good condition
 {"state": [20, 1, 12, 2, 1, 5, 91.2, 30.5, 30.1, 1.8, 2.2, 1, 30.0, 22.0, 1]}
 
-// 2. Mokra staza, istrošene gume
-{"state": [5, 2, 22, 2, 1, 8, 100.5, 35.0, 34.0, 0.5, 1.0, 2, 23.0, 18.0, 2]}
-
-// 3. Kišni uvjeti, agresivan stil
+// Rain
 {"state": [7, 3, 18, 1, 1, 4, 105.0, 36.5, 35.2, 0.8, 1.5, 1, 19.0, 16.0, 3]}
 
-// 4. Vruća staza, medium compound
+// Hot track, MEDIUM compound
 {"state": [15, 1, 9, 1, 1, 3, 95.0, 31.0, 30.0, 2.5, 3.0, 0, 36.0, 28.0, 1]}
 ```
 
----
+The response contains the final (SAFE) action and an explanation with the RAW action, human-readable labels, violated rules and every override (shortened example):
 
-## Testiranje API-ja
-
-Pokreni `main.ipynb` za:
-
-* Slanje zahtjeva prema API-ju
-* Provjeru interpretacija i odgovora
-* Prikaz grafova po koraku (reward, akcije)
-
----
-
-## Ovisnosti
-
-`requirements.txt` sadrži sve potrebno (uključujući `shimmy` i `gym`, potrebne jer projekt koristi stariju `gym` API-ju uz noviji `stable-baselines3`):
-
-```bash
-pip install -r requirements.txt
+```json
+{
+  "action": [0, 3, 0],
+  "explanation": {
+    "raw_action": [0, 1, 0],
+    "safe_action": [0, 3, 0],
+    "logic": {
+      "overrides": [
+        {"field": "compound", "from": 1, "to": 3, "rule": "R2_DAMP_REQUIRES_INTER", "why": "Damp: INTER is mandatory"}
+      ]
+    }
+  }
+}
 ```
 
----
-
-## Struktura projekta
-
-```
-VS_Code verzija/
-├\api.py                   # FastAPI sučelje
-├\f1_env.py                # Okruženje s nagradnom funkcijom i vremenskim uvjetima
-├\model.py                 # LSTMFeatureExtractor - eksperimentalna komponenta za budući
-│                           # rad, trenutno se NE koristi (train.py koristi standardnu
-│                           # MLP arhitekturu 256-128-64 definiranu izravno u PPO pozivu)
-├\train.py                 # PPO treniranje s evaluacijama
-├\prepare_data.py          # Učitavanje i spremanje FastF1 podataka
-├\.ipynb                   # Evaluacija + API testiranje
-├\predict_strategies.py    # Evaluacija RAW vs SAFE (logički sloj), R10 provjera po utrci
-├\utils.py                 # Helper funkcije, značajke, skaliranje opažanja
-├\saved_models/            # Trenirani modeli
-├\data/                    # .npy i CSV podaci
-└\requirements.txt         # Python ovisnosti
-```
+For a batch request, send a list: `[{"state": [...]}, {"state": [...]}]`.
 
 ---
 
-## Testiranje
+## Testing
 
-Projekt ima jedinične testove (pytest) za dijelove koda koji ne ovise o
-FastF1 mreži ni o treniranom modelu - pravila u `safety_layer.py`, mehaniku
-okruženja u `f1_env.py` (segmentacija utrka, miješanje redoslijeda, per-utrka
-bookkeeping) i pomoćne funkcije u `utils.py`:
+Unit tests (pytest) cover the parts that do not depend on the FastF1 network or the trained model: the rules in `safety_layer.py`, the environment mechanics in `f1_env.py` (race segmentation, race-order shuffling, per-race bookkeeping, seeding) and the helpers in `utils.py`.
 
 ```bash
 pytest -v
 ```
 
-`prepare_data.py` se namjerno ne testira izravno jer na vrhu datoteke odmah
-pokreće FastF1 mrežne pozive - njegove čiste (bez I/O) pomoćne funkcije
-(`classify_weather`, `worst_track_status`) žive u `utils.py` upravo zato da
-budu testabilne izolirano.
+`prepare_data.py` is not tested directly because it calls the FastF1 API at import time; its pure helper functions (`classify_weather`, `worst_track_status`) live in `utils.py` so they can be tested in isolation.
 
 ---
 
-## Poznata ograničenja
+## Project structure
 
-* `FrontGap`/`RearGap` (razmak do vozila ispred/iza) su sintetički generirani - FastF1 ne pruža pouzdan izvor za tu značajku na razini kruga.
-* `Style` (stil vožnje) ground truth je heuristički proxy izveden iz `FrontGap`/`RearGap`/`TyreLife`, ne stvarna telemetrija (u F1 podacima ne postoji izravna oznaka "stila").
-* Agent trenutno pita nešto češće od stvarnih vozača (~9-10% naspram stvarnih ~2.5%) - posljedica asimetrične nagrade uvedene da spriječi suprotan problem (agent koji nikad ne pita). Sigurnosni sloj (`safety_layer.py`) i dalje osigurava usklađenost sa strateškim pravilima neovisno o ovome.
-* Okruženje (`f1_env.py`) simulira raznolike scenarije (kišu, Safety Car) preko postojećih stvarnih podataka; nije puna fizička simulacija utrke - `TyreLife` i ostale značajke ne mijenjaju se dinamički kao posljedica agentovih odluka unutar jednog prolaska kroz podatke.
-* `LSTMFeatureExtractor` (`model.py`) je pripremljen kao osnova za budući rad prema recurrentnoj politici, ali trenutno nije uključen u trening - za stvarnu memoriju kroz krugove bio bi potreban `RecurrentPPO` (sb3-contrib), ne standardni `PPO`.
+```
+├── api.py                  # FastAPI service
+├── f1_env.py               # Gym environment: reward, curriculum, synthetic scenarios
+├── train.py                # PPO training with evaluation and plots
+├── safety_layer.py         # Rules R1-R10, overrides and explanations
+├── predict_strategies.py   # Offline evaluation RAW vs SAFE, R10 check per race
+├── prepare_data.py         # FastF1 data download and feature engineering
+├── utils.py                # Features, observation scaling, pure helpers
+├── model.py                # LSTM feature extractor (experimental, not used, see below)
+├── main.py                 # Runs data preparation, training and the API in sequence
+├── main.ipynb              # Interactive evaluation and API demo
+├── test_*.py               # Unit tests
+├── saved_models/           # Trained models (best and final)
+├── data/                   # Prepared observations, ground truth, predictions
+└── requirements.txt
+```
 
 ---
 
+## Known limitations
+
+- **No held-out evaluation yet.** The results above are measured on the training races. The next step is to train on two tracks and evaluate on the third.
+- **Synthetic gap features.** `FrontGap` and `RearGap` are generated synthetically, because FastF1 does not provide a reliable per-lap source for them.
+- **Heuristic style labels.** The ground-truth driving style is a heuristic derived from `FrontGap`, `RearGap` and `TyreLife`; F1 data has no direct "style" label.
+- **Pit frequency.** The agent pits more often than real drivers (~9 % of laps vs ~2.5 %), a consequence of the asymmetric reward that prevents the opposite failure (never pitting). The safety layer still enforces the strategy rules independently.
+- **Not a physical race simulation.** The environment replays real laps with synthetic rain and Safety Car scenarios on top; `TyreLife` and other features do not change as a consequence of the agent's decisions.
+- **No memory across laps.** `LSTMFeatureExtractor` in `model.py` is kept as a starting point for future work. Real memory over laps would require `RecurrentPPO` from `sb3-contrib` instead of standard PPO.
+
+---
+
+## Tech stack
+
+Python · Stable-Baselines3 (PPO) · Gym · PyTorch · FastF1 · pandas · NumPy · scikit-learn · FastAPI · Pydantic · pytest · Matplotlib
+
+## Author
+
+Antonela Ković – [GitHub](https://github.com/antonela-kovic)

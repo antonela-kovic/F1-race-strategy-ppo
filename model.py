@@ -1,13 +1,10 @@
-# === model.py ===
-# NAPOMENA: klasa ispod (LSTMFeatureExtractor) trenutno se NE koristi u
-# train.py - taj koristi standardnu MLP arhitekturu (net_arch=[256,128,64])
-# definiranu izravno u PPO pozivu, u skladu s onim što opisuje pisani rad.
-# Ova klasa je ovdje sačuvana kao polazna točka za budući rad prema
-# rekurentnoj politici. VAŽNO ako je se ikad ponovno poveže: ispod NIJE
-# implementirana stvarna memorija kroz krugove - svaki forward() poziv gradi
-# novu "sekvencu" duljine 1 s nultim skrivenim stanjem, pa LSTM sloj ovdje
-# efektivno ne pamti prethodne krugove. Za stvarnu memoriju kroz vrijeme
-# potreban je RecurrentPPO (paket sb3-contrib), ne standardni PPO.
+# model.py
+# NOTE: LSTMFeatureExtractor is currently NOT used. train.py uses a standard
+# MLP architecture (net_arch=[256, 128, 64]) defined directly in the PPO call.
+# This class is kept as a starting point for future work on a recurrent policy.
+# It does not implement real memory across laps: every forward() call builds a
+# new sequence of length 1 with a zero hidden state. Real memory over time
+# would require RecurrentPPO (sb3-contrib) instead of the standard PPO.
 import torch.nn as nn
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
@@ -23,5 +20,3 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
             obs = obs.unsqueeze(1)
         _, (h_n, _) = self.lstm(obs)
         return h_n.squeeze(0)
-
-
