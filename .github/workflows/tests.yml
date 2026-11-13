@@ -11,6 +11,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install test dependencies
-        run: pip install "numpy<2" gym pytest
+        run: pip install "numpy<2" pandas gym pytest
       - name: Run unit tests
         run: pytest -v

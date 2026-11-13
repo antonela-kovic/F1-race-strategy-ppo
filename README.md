@@ -20,12 +20,13 @@ flowchart LR
 
 | Component | What it does |
 |---|---|
-| `prepare_data.py` | Downloads 2023 races (Silverstone, Monza, Spa) for four drivers (VER, HAM, LEC, PER), joins real weather data and builds observations and ground-truth actions |
+| `prepare_data.py` | Downloads 2023 races (Silverstone, Monza, Spa) for four drivers (VER, HAM, LEC, PER), joins real weather data, computes real gaps to the cars ahead/behind and a pace-based style label, and builds observations and ground-truth actions |
 | `f1_env.py` | Gym environment with a shaped reward, a three-level curriculum and block-wise synthetic rain/damp and Safety Car/VSC scenarios |
 | `train.py` | PPO training (Stable-Baselines3), keeps the best checkpoint by reward per step |
 | `safety_layer.py` | Ten named rules (wet tyres in rain, no aggressive style under Safety Car, two mandatory dry compounds, …) that override unsafe actions and explain every override |
 | `api.py` | REST API: single prediction, batch prediction over a race, rule-based explanation |
-| `predict_strategies.py` | Offline evaluation: RAW policy vs SAFE (policy + rules) against the real drivers' decisions |
+| `evaluate_holdout.py` | Leave-one-track-out evaluation: train on two tracks, test on the third |
+| `predict_strategies.py` | In-sample evaluation: RAW policy vs SAFE (policy + rules) against the real drivers' decisions |
 
 ### Action space
 
@@ -54,19 +55,49 @@ flowchart LR
 
 ## Results
 
-Evaluation on all 674 laps of the dataset (12 driver–race combinations), SAFE = policy + safety layer:
+### Held-out evaluation (leave one track out)
 
-| Decision | SAFE accuracy | Majority-class baseline |
-|---|---|---|
-| Compound | 69.6 % | 43.9 % |
-| Driving style | 64.2 % | 42.1 % |
-| Pit stop | 92.7 % (recall 88 %, precision 24 %) | 97.5 % (never pit) |
+The main result is measured on a track the agent has **never seen**: for each
+of the three tracks, a model is trained on the other two and evaluated on the
+held-out one (three folds). The held-out track is also excluded from
+checkpoint selection, and the majority-class baseline is taken from the
+training tracks.
 
-Pit stops happen on only ~2.5 % of laps, so accuracy is not a meaningful metric for them: a model that never pits reaches 97.5 %. The agent catches 15 of the 17 real pit stops (recall 88 %) at the cost of false alarms (it pits on ~9 % of laps). The asymmetric pit reward in `f1_env.py` is tuned for this trade-off.
+```bash
+python prepare_data.py       # needs internet (FastF1)
+python evaluate_holdout.py   # ~25 min on a laptop CPU, writes docs/holdout_results.md
+```
 
-> These numbers are measured on the same races the agent was trained on. An evaluation on held-out races is listed under [Known limitations](#known-limitations).
+The table in [`docs/holdout_results.md`](docs/holdout_results.md) reports, per
+held-out track: compound accuracy, style accuracy (only on laps with a style
+label, see below), pit recall / precision / predicted pit rate, and the same
+model's in-sample compound accuracy for comparison.
 
-<!-- TODO: add training and evaluation plots, e.g. docs/reward_curve.png and docs/raw_vs_safe.png -->
+Pit stops happen on only ~2.5 % of laps, so accuracy is not a meaningful
+metric for them (a model that never pits reaches 97.5 %); recall and precision
+are reported instead.
+
+### Driving-style label
+
+F1 data has no "driving style" label. Earlier versions used a rule over
+`FrontGap`, `RearGap` and `TyreLife`, i.e. a function of features the agent
+also observes, with random gaps, so style accuracy only measured how well the
+network re-learned that rule. The label is now derived from **measured pace**
+(`compute_style_labels` in `utils.py`): within each stint, lap time is fitted
+as a linear function of tyre age (tyre degradation + fuel burn), and the
+residual decides the label: more than 0.2 s faster than the trend = aggressive,
+more than 0.2 s slower = conservative, otherwise neutral. Laps where pace says
+nothing about the driver's choice (lap 1, pit in/out laps, SC/VSC/yellow,
+laps FastF1 marks as inaccurate) are left unlabeled (`-1`) and are excluded
+from the style reward and from style accuracy.
+
+### Previous in-sample numbers (v6, historical)
+
+Before these fixes, v6 was evaluated on all 674 laps it was trained on, with
+random gaps and the gap-based style rule: compound 69.6 % (baseline 43.9 %),
+style 64.2 % (baseline 42.1 %), pit recall 88 % / precision 24 %. These numbers
+are in-sample and are kept only for reference; `predict_strategies.py` still
+produces this kind of in-sample report.
 
 ---
 
@@ -76,6 +107,8 @@ Pit stops happen on only ~2.5 % of laps, so accuracy is not a meaningful metric 
 - Internet access the first time `prepare_data.py` runs (FastF1 downloads and caches the data)
 
 The trained models (`saved_models/`) and the prepared data (`data/`) are committed, so the API and the evaluation can run without retraining.
+
+> **Regenerate the data after updating.** The committed `data/` was built by an older `prepare_data.py`: it has random `FrontGap`/`RearGap`, the old gap-based style label, undecoded `TrackStatus` strings (e.g. `41`), no `track_ids.npy`, and its "Spa" laps are actually the **Spanish** GP (FastF1 resolved the short name `'Spa'` to Barcelona). Run `python prepare_data.py` and then `python train.py` / `python evaluate_holdout.py` to get data and models consistent with the current code.
 
 ## Installation
 
@@ -101,10 +134,13 @@ python train.py          # PPO training with curriculum, saves saved_models/*_be
 ### 2. Evaluate
 
 ```bash
-python predict_strategies.py
+python evaluate_holdout.py              # held-out: train on 2 tracks, test on the 3rd (all folds)
+python evaluate_holdout.py --tracks Spa # one fold only
+python train.py --holdout Spa           # train a single held-out model with plots
+python predict_strategies.py            # in-sample report for the model used by the API
 ```
 
-Prints RAW vs SAFE accuracy, the safety-layer override rate per field and the R10 check per race. The same evaluation is available interactively in `main.ipynb`.
+`predict_strategies.py` prints RAW vs SAFE accuracy, the safety-layer override rate per field and the R10 check per race, on the same races the model was trained on. The same in-sample evaluation is available interactively in `main.ipynb`.
 
 ### 3. Run the REST API
 
@@ -166,7 +202,7 @@ For a batch request, send a list: `[{"state": [...]}, {"state": [...]}]`.
 
 ## Testing
 
-Unit tests (pytest) cover the parts that do not depend on the FastF1 network or the trained model: the rules in `safety_layer.py`, the environment mechanics in `f1_env.py` (race segmentation, race-order shuffling, per-race bookkeeping, seeding) and the helpers in `utils.py`.
+Unit tests (pytest) cover the parts that do not depend on the FastF1 network or the trained model: the rules in `safety_layer.py`, the environment mechanics in `f1_env.py` (race segmentation, race-order shuffling, per-race bookkeeping, seeding) and the helpers in `utils.py` (including gap computation and style labels) and the metrics / track split in `evaluation.py`.
 
 ```bash
 pytest -v
@@ -183,7 +219,9 @@ pytest -v
 ├── f1_env.py               # Gym environment: reward, curriculum, synthetic scenarios
 ├── train.py                # PPO training with evaluation and plots
 ├── safety_layer.py         # Rules R1-R10, overrides and explanations
-├── predict_strategies.py   # Offline evaluation RAW vs SAFE, R10 check per race
+├── evaluate_holdout.py     # Leave-one-track-out evaluation (train on 2, test on 3rd)
+├── evaluation.py           # Shared evaluation: per-race policy run, metrics, track split
+├── predict_strategies.py   # In-sample evaluation RAW vs SAFE, R10 check per race
 ├── prepare_data.py         # FastF1 data download and feature engineering
 ├── utils.py                # Features, observation scaling, pure helpers
 ├── model.py                # LSTM feature extractor (experimental, not used, see below)
@@ -191,7 +229,8 @@ pytest -v
 ├── main.ipynb              # Interactive evaluation and API demo
 ├── test_*.py               # Unit tests
 ├── saved_models/           # Trained models (best and final)
-├── data/                   # Prepared observations, ground truth, predictions
+├── data/                   # Prepared observations, ground truth, track ids, predictions
+├── docs/                   # Generated held-out results
 └── requirements.txt
 ```
 
@@ -199,9 +238,9 @@ pytest -v
 
 ## Known limitations
 
-- **No held-out evaluation yet.** The results above are measured on the training races. The next step is to train on two tracks and evaluate on the third.
-- **Synthetic gap features.** `FrontGap` and `RearGap` are generated synthetically, because FastF1 does not provide a reliable per-lap source for them.
-- **Heuristic style labels.** The ground-truth driving style is a heuristic derived from `FrontGap`, `RearGap` and `TyreLife`; F1 data has no direct "style" label.
+- **Only three tracks.** The leave-one-track-out evaluation has three folds with ~200 laps each, so the held-out numbers have a large variance; more races would make them more reliable.
+- **Gap features are end-of-lap intervals.** `FrontGap` and `RearGap` are the real time differences to the car one position ahead / behind at the timing line at the end of the lap, computed from all drivers' lap times (`compute_gaps` in `utils.py`). They are clipped to 10 s (leader, last car, or a missing neighbour also get 10 s), and they do not see a lapped car that is physically in front.
+- **Style is still a proxy.** The pace-based label comes from real timing data, but a slow lap can also be caused by traffic or dirty air rather than a deliberate choice. The residual uses the lap's own `LapTime`, which is also an observed feature, so the agent sees part of the information the label is built from.
 - **Pit frequency.** The agent pits more often than real drivers (~9 % of laps vs ~2.5 %), a consequence of the asymmetric reward that prevents the opposite failure (never pitting). The safety layer still enforces the strategy rules independently.
 - **Not a physical race simulation.** The environment replays real laps with synthetic rain and Safety Car scenarios on top; `TyreLife` and other features do not change as a consequence of the agent's decisions.
 - **No memory across laps.** `LSTMFeatureExtractor` in `model.py` is kept as a starting point for future work. Real memory over laps would require `RecurrentPPO` from `sb3-contrib` instead of standard PPO.
