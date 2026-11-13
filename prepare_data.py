@@ -1,4 +1,4 @@
-# prepare_data.py
+﻿# prepare_data.py
 # Downloads lap and weather data with FastF1, builds the observation array and
 # the ground-truth actions (pit, compound, style) and saves them to data/.
 import os
@@ -22,7 +22,7 @@ races = [
     # (year, official event name, session, short track label used in data/)
     (2023, 'British Grand Prix', 'R', 'Silverstone'),
     (2023, 'Italian Grand Prix', 'R', 'Monza'),
-    (2023, 'Belgian Grand Prix', 'R', 'Spa'),
+    (2023, 'Spanish Grand Prix', 'R', 'Barcelona'),
 ]
 drivers = ['VER', 'HAM', 'LEC', 'PER']
 all_laps = []
