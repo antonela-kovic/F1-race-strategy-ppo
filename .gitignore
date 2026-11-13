@@ -26,3 +26,7 @@ data/cache/
 
 # pytest
 .pytest_cache/
+
+saved_models/ppo_holdout_*.zip
+
+saved_models/ppo_holdout_*.zip
