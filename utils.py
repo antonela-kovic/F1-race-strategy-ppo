@@ -110,3 +110,112 @@ def worst_track_status(raw) -> int:
         if str(code) in digits:
             return code
     return 1
+
+
+# === Real gap features (FrontGap / RearGap) ===
+# FastF1 has no per-lap "gap" column, but every lap of EVERY driver has `Time`,
+# the session time at which the car crossed the timing line at the end of that
+# lap, and `Position` after that lap. The gap to the car ahead at the end of lap
+# N is therefore the difference between the two crossing times on lap N. This
+# is the same definition the official timing screens use for "interval".
+# The function must receive the laps of ALL drivers in the session, not only the
+# drivers used for training, otherwise the car ahead is usually missing.
+GAP_CAP_SECONDS = 10.0  # leader / last car / missing neighbour; also keeps
+                        # FrontGap / 5.0 inside the observation bound of 2.0
+
+
+def compute_gaps(laps, cap=GAP_CAP_SECONDS):
+    """
+    Return a copy of `laps` (pandas DataFrame with columns Driver, LapNumber,
+    Position and Time; Time as timedelta or seconds) with two new columns:
+      FrontGap - seconds to the car one position ahead on the same lap
+      RearGap  - seconds to the car one position behind on the same lap
+    Values are clipped to [0, cap]; the leader gets FrontGap=cap, the last
+    classified car RearGap=cap, and laps without a Position/Time get cap.
+    """
+    import pandas as pd
+
+    df = laps.copy()
+    t = df["Time"]
+    t_sec = t.dt.total_seconds() if pd.api.types.is_timedelta64_dtype(t) else t.astype(float)
+    df["_t"] = t_sec
+    df["FrontGap"] = float(cap)
+    df["RearGap"] = float(cap)
+
+    valid = df["Position"].notna() & df["_t"].notna()
+    for _, g in df[valid].groupby("LapNumber"):
+        g = g.sort_values("Position")
+        times = g["_t"].to_numpy()
+        pos = g["Position"].to_numpy()
+        front = np.full(len(g), float(cap))
+        rear = np.full(len(g), float(cap))
+        for k in range(1, len(g)):
+            # only a true neighbour (position exactly one ahead) counts
+            if pos[k] - pos[k - 1] == 1:
+                gap = times[k] - times[k - 1]
+                front[k] = gap
+                rear[k - 1] = gap
+        df.loc[g.index, "FrontGap"] = np.clip(front, 0.0, cap)
+        df.loc[g.index, "RearGap"] = np.clip(rear, 0.0, cap)
+
+    return df.drop(columns="_t")
+
+
+# === Driving-style label from real pace ===
+# F1 data has no "style" label. The previous label was a rule over FrontGap,
+# RearGap and TyreLife, i.e. a deterministic function of features the agent
+# also observes (and the gaps were random), so style accuracy only measured
+# how well the network re-learned that rule.
+#
+# The label is now derived from MEASURED pace: within each stint of a driver,
+# lap time is fitted as a linear function of tyre age (this captures tyre
+# degradation and fuel burn, which are collinear inside a stint). The residual
+# says how much faster or slower than his own stint trend the driver was on
+# that lap:
+#   residual < -threshold -> 2 aggressive (pushing harder than the trend)
+#   residual > +threshold -> 0 conservative (managing / saving tyres)
+#   otherwise             -> 1 neutral
+# It is still a proxy (a slow lap can also be caused by traffic), but it comes
+# from real timing data and is not a function of the observation alone.
+#
+# Laps where pace says nothing about the driver's choice (lap 1, pit in/out
+# laps, Safety Car/VSC/yellow, laps FastF1 marks as inaccurate, stints with too
+# few clean laps) get STYLE_UNLABELED and are excluded from the style reward in
+# f1_env.py and from style accuracy in evaluation.py.
+STYLE_UNLABELED = -1
+STYLE_PACE_THRESHOLD = 0.2  # seconds; gives roughly 25/50/25 % on 2023 data
+MIN_CLEAN_LAPS_PER_STINT = 4
+
+
+def compute_style_labels(laps, threshold=STYLE_PACE_THRESHOLD,
+                         min_laps=MIN_CLEAN_LAPS_PER_STINT):
+    """
+    Return (style, residual) as numpy arrays aligned with the rows of `laps`
+    (DataFrame with Track, Driver, Stint, LapNumber, LapTime [s], TyreLife,
+    TrackStatus [decoded int], IsAccurate, Pit and optionally PitOutTime).
+    style is 0/1/2 or STYLE_UNLABELED, residual is NaN where unlabeled.
+    """
+    import pandas as pd
+
+    df = laps.reset_index(drop=True)
+    clean = (
+        df["IsAccurate"].astype(str).str.lower().isin(["true", "1", "1.0"])
+        & (df["TrackStatus"].astype(int) == 1)
+        & (df["Pit"].astype(int) == 0)
+        & (df["LapNumber"] > 1)
+        & df["LapTime"].notna()
+    )
+    if "PitOutTime" in df.columns:
+        clean &= df["PitOutTime"].isna()
+
+    style = np.full(len(df), STYLE_UNLABELED, dtype=np.int32)
+    residual = np.full(len(df), np.nan)
+    group_cols = [c for c in ("Year", "Track", "Driver", "Stint") if c in df.columns]
+    for _, g in df[clean].groupby(group_cols):
+        if len(g) < min_laps or g["TyreLife"].nunique() < 2:
+            continue
+        coef = np.polyfit(g["TyreLife"].astype(float), g["LapTime"].astype(float), 1)
+        r = g["LapTime"].to_numpy(float) - np.polyval(coef, g["TyreLife"].to_numpy(float))
+        residual[g.index] = r
+        style[g.index] = np.where(r < -threshold, 2, np.where(r > threshold, 0, 1))
+    return style, residual

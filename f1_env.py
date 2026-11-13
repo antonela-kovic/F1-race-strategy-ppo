@@ -5,7 +5,7 @@
 import gym
 from gym import spaces
 import numpy as np
-from utils import selected_features, scale_observation
+from utils import selected_features, scale_observation, STYLE_UNLABELED
 
 # Curriculum difficulty does not filter laps by weather (all available races
 # are dry). Instead, it controls how often the agent encounters synthetic but
@@ -349,7 +349,10 @@ class FastF1MultiActionEnv(gym.Env):
             # valid target; the rule-based terms above handle those laps instead.
             if not is_synth_weather_lap:
                 reward += 4.0 if comp == true_comp else -1.5
-            if not (is_synth_weather_lap or is_synth_caution_lap):
+            # Style is only imitated on laps with a pace-based label (see
+            # compute_style_labels in utils.py); lap 1, pit laps, SC/VSC and
+            # inaccurate laps are STYLE_UNLABELED and carry no style target.
+            if not (is_synth_weather_lap or is_synth_caution_lap) and true_style != STYLE_UNLABELED:
                 reward += 4.0 if style == true_style else -1.5
 
         # Small constant per-lap penalty

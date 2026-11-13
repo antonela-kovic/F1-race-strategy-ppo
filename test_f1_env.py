@@ -243,3 +243,18 @@ def test_reset_without_seed_remains_stochastic(obs_array, true_actions):
         env.reset()
         orders.append(tuple(env.orig_indices.tolist()))
     assert len(set(orders)) > 1
+
+def test_unlabeled_style_gives_no_style_reward():
+    """Laps with STYLE_UNLABELED must not reward or penalise any style."""
+    from utils import STYLE_UNLABELED
+    obs = make_synthetic_obs([12])
+    true = np.zeros((len(obs), 3), dtype=np.int32) + [0, 1, STYLE_UNLABELED]
+    totals = []
+    for style in (0, 1):
+        env = FastF1MultiActionEnv(obs, true_actions=true, difficulty_level="easy")
+        env.reset(seed=1)
+        # step 0 only: no monotony/terminal terms yet; FrontGap=3.0 so the
+        # gap-based style bonus does not fire either
+        _, reward, _, _, _ = env.step(np.array([0, 1, style]))
+        totals.append(reward)
+    assert totals[0] == pytest.approx(totals[1])
