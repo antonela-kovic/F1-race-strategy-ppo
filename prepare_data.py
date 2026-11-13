@@ -1,4 +1,4 @@
-# prepare_data.py
+﻿# prepare_data.py
 # Downloads lap and weather data with FastF1, builds the observation array and
 # the ground-truth actions (pit, compound, style) and saves them to data/.
 import os
@@ -6,34 +6,47 @@ import pandas as pd
 import numpy as np
 import fastf1
 import matplotlib.pyplot as plt
-from utils import COMPOUND_TO_CODE, classify_weather, worst_track_status
+from utils import (COMPOUND_TO_CODE, STYLE_UNLABELED, classify_weather,
+                   compute_gaps, compute_style_labels, worst_track_status)
 
 # Enable the FastF1 cache
 os.makedirs("data/cache", exist_ok=True)
 fastf1.Cache.enable_cache("data/cache")
 
 # === Data from multiple races and drivers ===
+# Events are given by their FULL official name. A short name such as 'Spa' is
+# resolved by FastF1's fuzzy matching and silently picked the SPANISH Grand
+# Prix (Barcelona, 66 laps) instead of the Belgian one; the check below makes
+# such a mismatch fail loudly instead of producing wrongly labelled data.
 races = [
-    (2023, 'Silverstone', 'R'),
-    (2023, 'Monza', 'R'),
-    (2023, 'Spa', 'R')
+    # (year, official event name, session, short track label used in data/)
+    (2023, 'British Grand Prix', 'R', 'Silverstone'),
+    (2023, 'Italian Grand Prix', 'R', 'Monza'),
+    (2023, 'Spanish Grand Prix', 'R', 'Barcelona'),
 ]
 drivers = ['VER', 'HAM', 'LEC', 'PER']
 all_laps = []
 
-for year, gp, session_type in races:
+for year, gp, session_type, track_label in races:
     session = fastf1.get_session(year, gp, session_type)
+    if session.event["EventName"] != gp:
+        raise ValueError(f"FastF1 resolved '{gp}' to '{session.event['EventName']}'")
     session.load()
 
     # Real weather data for the WHOLE session (shared by all drivers)
     weather_data = session.weather_data.copy().sort_values("Time").reset_index(drop=True)
 
+    # REAL gaps to the car ahead / behind, computed from the timing-line
+    # crossing times of ALL drivers (see compute_gaps in utils.py). This has to
+    # happen before the laps are filtered to the four drivers below.
+    session_laps = compute_gaps(pd.DataFrame(session.laps))
+
     for drv in drivers:
-        laps = session.laps.pick_driver(drv)
-        laps = laps[laps['LapTime'].notnull()].copy()
+        laps = session_laps[session_laps["Driver"] == drv]
+        laps = laps[laps['LapTime'].notnull() & laps['Time'].notnull()].copy()
         laps["Driver"] = drv
         laps["Year"] = year
-        laps["Track"] = gp
+        laps["Track"] = track_label
         laps = laps.sort_values("Time").reset_index(drop=True)
 
         # Join with the REAL weather data: merge_asof finds the nearest
@@ -42,22 +55,8 @@ for year, gp, session_type in races:
             laps, weather_data[["Time", "Rainfall", "TrackTemp", "AirTemp"]],
             on="Time", direction="nearest"
         )
-        # Use TrackTemp/AirTemp from weather_data if the lap data has none
-        if "TrackTemperature" not in laps or laps["TrackTemperature"].isna().all():
-            laps["TrackTemperature"] = laps["TrackTemp"]
-        if "AirTemperature" not in laps or laps["AirTemperature"].isna().all():
-            laps["AirTemperature"] = laps["AirTemp"]
-
-        # FastF1 does not provide FrontGap/RearGap per lap, so they are synthetic
-        if "FrontGap" not in laps:
-            laps["FrontGap"] = np.random.uniform(0.5, 5.0, size=len(laps))
-        if "RearGap" not in laps:
-            laps["RearGap"] = np.random.uniform(0.5, 5.0, size=len(laps))
-
-        # Add any missing key columns
-        for col in ["FrontGap", "RearGap", "TrackTemperature", "AirTemperature"]:
-             if col not in laps:
-                 laps[col] = np.random.uniform(20.0, 35.0, size=len(laps)) if "Temperature" in col else np.random.uniform(0.5, 5.0, size=len(laps))
+        laps["TrackTemperature"] = laps["TrackTemp"]
+        laps["AirTemperature"] = laps["AirTemp"]
 
         all_laps.append(laps)
 
@@ -82,17 +81,6 @@ for (drv, yr, trk), group in laps.groupby(["Driver", "Year", "Track"], sort=Fals
     idx = group.index
     laps.loc[idx, "Weather"] = classify_weather(group["Rainfall"].tolist())
 
-# Heuristic driving style (FastF1 has no direct "style" label)
-def assign_style(row):
-    if row["FrontGap"] < 1.5 or row["RearGap"] < 1.5:
-        return 0  # conservative
-    elif row["TyreLife"] < 8 or row["LapTime"] > 100:
-        return 1  # neutral
-    else:
-        return 2  # aggressive
-
-laps["Style"] = laps.apply(assign_style, axis=1)
-
 # CompoundChoice (ground truth for comparison with the driver) = the REAL tyre
 # the driver used on that lap (same convention as CompoundEncoded above)
 laps["CompoundChoice"] = laps["CompoundEncoded"]
@@ -101,6 +89,15 @@ laps["CompoundChoice"] = laps["CompoundEncoded"]
 # worst_track_status() in utils.py for decoding
 if "TrackStatus" in laps.columns:
     laps["TrackStatus"] = laps["TrackStatus"].apply(worst_track_status)
+
+# Driving-style label from REAL pace relative to the driver's own stint trend
+# (see compute_style_labels in utils.py). Needs the DECODED TrackStatus above.
+# Laps without a meaningful label are STYLE_UNLABELED (-1) and are ignored by
+# the style reward and by the style accuracy.
+laps["Style"], laps["PaceResidual"] = compute_style_labels(laps)
+n_labeled = int((laps["Style"] != STYLE_UNLABELED).sum())
+print(f"Style labels: {n_labeled}/{len(laps)} laps labeled, distribution:",
+      laps.loc[laps["Style"] != STYLE_UNLABELED, "Style"].value_counts().sort_index().to_dict())
 
 # Features
 selected_features = [
@@ -122,6 +119,9 @@ true_actions = laps[["Pit", "CompoundChoice", "Style"]].to_numpy(dtype=np.int32)
 
 np.save("data/obs_array.npy", obs_array)
 np.save("data/true_actions.npy", true_actions)
+# Track of every row, used for the leave-one-track-out evaluation
+# (evaluate_holdout.py): train on two tracks, test on the third.
+np.save("data/track_ids.npy", laps["Track"].to_numpy(dtype=str))
 
 print("Data saved in .csv and .npy format.")
 
