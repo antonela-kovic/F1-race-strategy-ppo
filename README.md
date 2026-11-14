@@ -212,7 +212,7 @@ python train.py --holdout Monza           # train a single held-out model with p
 python predict_strategies.py            # in-sample report for the model used by the API
 ```
 
-`predict_strategies.py` prints RAW vs SAFE accuracy, the safety-layer override rate per field and the R10 check per race, on the same races the model was trained on. The same in-sample evaluation is available interactively in `main.ipynb`.
+`predict_strategies.py` prints RAW vs SAFE accuracy, the safety-layer override rate per field and the R10 check per race, on the same races the model was trained on. The committed API model (`saved_models/ppo_f1_rl_logic_v6_best.zip`) was trained on all three tracks with seeds 0, 1 and 2, and seed 1 was kept because its best checkpoint had the highest reward per step, the same criterion `train.py` uses within one run (not a test metric). In-sample with the safety layer it reaches compound 77.0 % (baseline 43.9 %), 10 of 17 pit stops at a 9.9 % pit rate, and style 43.5 % (baseline 50.3 %); these numbers are on its own training data. The same in-sample evaluation is available interactively in `main.ipynb`.
 
 ### 3. Run the REST API
 
