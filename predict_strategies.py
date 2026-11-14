@@ -43,6 +43,7 @@ predicted_actions = safe_actions   # default: safety layer enabled
 n = len(obs_array)
 print(f"Safety layer override rate: {stats['laps_with_override']/n:.2%}")
 print(f"Violations (raw): {stats['laps_with_violation']/n:.2%}")
+print("Overrides by rule:", ", ".join(f"{r}={c}" for r, c in sorted(stats["rule_counts"].items())))
 print(f"Overrides by field: pit={stats['pit_overrides']}, "
       f"compound={stats['comp_overrides']}, style={stats['style_overrides']}")
 

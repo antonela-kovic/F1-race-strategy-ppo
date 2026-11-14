@@ -73,24 +73,70 @@ def test_r3a_allows_all_dry_compounds_unchanged():
         assert safe[1] == comp  # HARD is not rewritten on a dry track
 
 
-# --- R4: critically low tyre life forces a pit ---
+# --- TyreLife is the tyre AGE in laps (1 = new tyre) ---
+# R4 (forced pit on "low tyre life") was removed, R5 blocks a pit on almost
+# new tyres. See TYRE_AGE_FRESH in utils.py for the threshold.
 
-def test_r4_forces_pit_when_tyres_critical():
-    state = make_state(TyreLife=1.0)
-    action = np.array([0, 1, 0])
-    safe, report = verify_action(state, action, SELECTED_FEATURES)
-    assert safe[0] == 1
-    assert any(o["rule"] == "R4_LOW_TYRE_FORCES_PIT" for o in report.overrides)
+def _pit_overrides(report):
+    return [o for o in report.overrides if o["field"] == "pit"]
 
 
-# --- R5: block a pointless pit on a dry track with good tyres ---
-
-def test_r5_blocks_pointless_pit():
-    state = make_state(Weather=1, TyreLife=35.0)
-    action = np.array([1, 1, 0])
-    safe, report = verify_action(state, action, SELECTED_FEATURES)
+@pytest.mark.parametrize("tyre_age", [1.0, 3.0, 50.0])
+def test_no_forced_pit_on_any_tyre_age(tyre_age):
+    """No rule forces a pit because of tyre age: neither on a new tyre (the
+    old R4 bug) nor on a very old one (drivers ran 50-lap-old sets)."""
+    state = make_state(TyreLife=tyre_age)
+    safe, report = verify_action(state, np.array([0, 1, 0]), SELECTED_FEATURES)
     assert safe[0] == 0
-    assert any(o["rule"] == "R5_BLOCK_POINTLESS_PIT" for o in report.overrides)
+    assert not _pit_overrides(report)
+
+
+@pytest.mark.parametrize("tyre_age", [1.0, 5.0, 9.0])
+def test_r5_blocks_pit_on_fresh_tyres_dry(tyre_age):
+    state = make_state(Weather=1, TrackStatus=1, TyreLife=tyre_age)
+    safe, report = verify_action(state, np.array([1, 1, 0]), SELECTED_FEATURES)
+    assert safe[0] == 0
+    assert any(o["rule"] == "R5_BLOCK_PIT_ON_FRESH_TYRES" for o in report.overrides)
+
+
+@pytest.mark.parametrize("tyre_age", [10.0, 14.0, 26.0, 33.0, 45.0])
+def test_r5_does_not_block_pit_on_used_or_old_tyres(tyre_age):
+    """Real stops happened at ages 14-33; the old R5 blocked the two at 33."""
+    state = make_state(Weather=1, TrackStatus=1, TyreLife=tyre_age)
+    safe, report = verify_action(state, np.array([1, 1, 0]), SELECTED_FEATURES)
+    assert safe[0] == 1
+    assert not _pit_overrides(report)
+
+
+@pytest.mark.parametrize("track_status", [4, 5, 6, 7])
+def test_r5_allows_pit_on_fresh_tyres_under_sc_vsc_red(track_status):
+    state = make_state(Weather=1, TrackStatus=track_status, TyreLife=3.0)
+    safe, report = verify_action(state, np.array([1, 1, 0]), SELECTED_FEATURES)
+    assert safe[0] == 1
+    assert not _pit_overrides(report)
+
+
+def test_r5_still_blocks_under_yellow_flag():
+    """A yellow flag (2) is not a cheap pit window, unlike SC/VSC/red."""
+    state = make_state(Weather=1, TrackStatus=2, TyreLife=3.0)
+    safe, _ = verify_action(state, np.array([1, 1, 0]), SELECTED_FEATURES)
+    assert safe[0] == 0
+
+
+@pytest.mark.parametrize("weather", [2, 3])
+def test_r5_allows_pit_on_fresh_tyres_when_wet_or_damp(weather):
+    state = make_state(Weather=weather, TyreLife=3.0)
+    safe, report = verify_action(state, np.array([1, 3 if weather == 2 else 4, 0]),
+                                 SELECTED_FEATURES)
+    assert safe[0] == 1
+    assert not _pit_overrides(report)
+
+
+def test_r5_threshold_is_configurable():
+    state = make_state(Weather=1, TyreLife=12.0)
+    safe, _ = verify_action(state, np.array([1, 1, 0]), SELECTED_FEATURES,
+                            config={"tyre_age_block_pit": 15.0})
+    assert safe[0] == 0
 
 
 # --- R6: wet/damp forbids an aggressive style ---
