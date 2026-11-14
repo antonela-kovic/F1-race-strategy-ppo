@@ -21,9 +21,10 @@ DEFAULT_BEST_PATH = "saved_models/ppo_f1_rl_logic_v6_best.zip"
 DEFAULT_FINAL_PATH = "saved_models/ppo_f1_rl_logic_v6_retrained.zip"
 
 
-def holdout_model_paths(track):
-    return (f"saved_models/ppo_holdout_{track}_best.zip",
-            f"saved_models/ppo_holdout_{track}_final.zip")
+def holdout_model_paths(track, seed=None):
+    tag = track if seed is None else f"{track}_s{seed}"
+    return (f"saved_models/ppo_holdout_{tag}_best.zip",
+            f"saved_models/ppo_holdout_{tag}_final.zip")
 
 
 def train_agent(obs_array, true_actions, best_path=DEFAULT_BEST_PATH,

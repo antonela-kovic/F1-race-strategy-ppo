@@ -41,3 +41,22 @@ def test_metrics_ignore_unlabeled_style_laps():
 
 def test_majority_class_ignores_unlabeled():
     assert majority_class([STYLE_UNLABELED] * 5 + [1, 1, 0], ignore=STYLE_UNLABELED) == 1
+
+
+def test_seed_summary_pools_pits_over_folds_and_counts_blocked_stops():
+    import pandas as pd
+    from evaluate_holdout import seed_summary
+    rows = []
+    for track, true_pits, n_laps in (("A", 5, 200), ("B", 4, 200)):
+        # RAW catches every real stop, SAFE misses one at track A
+        for variant, recall, rate in (("RAW", 1.0, 0.05), ("SAFE", 0.8 if track == "A" else 1.0, 0.05)):
+            rows.append({"seed": 0, "held_out_track": track, "split": "test (held-out)",
+                         "variant": variant, "compound_acc": 0.5, "style_acc": 0.4,
+                         "pit_recall": recall, "true_pits": true_pits, "pit_rate": rate,
+                         "n_laps": n_laps,
+                         "overrides": "R5_BLOCK_PIT_ON_FRESH_TYRES=2" if variant == "SAFE" else None})
+    s = seed_summary(pd.DataFrame(rows)).iloc[0]
+    assert s.pits_caught == 8 and s.true_pits == 9
+    assert s.pits_blocked_by_layer == 1
+    assert s.pit_precision == pytest.approx(8 / 20)
+    assert "R5_BLOCK_PIT_ON_FRESH_TYRES=4" in s.overrides

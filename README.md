@@ -20,10 +20,10 @@ flowchart LR
 
 | Component | What it does |
 |---|---|
-| `prepare_data.py` | Downloads 2023 races (Silverstone, Monza, Spa) for four drivers (VER, HAM, LEC, PER), joins real weather data, computes real gaps to the cars ahead/behind and a pace-based style label, and builds observations and ground-truth actions |
+| `prepare_data.py` | Downloads 2023 races (Silverstone, Monza, Barcelona) for four drivers (VER, HAM, LEC, PER), joins real weather data, computes real gaps to the cars ahead/behind and a pace-based style label, and builds observations and ground-truth actions |
 | `f1_env.py` | Gym environment with a shaped reward, a three-level curriculum and block-wise synthetic rain/damp and Safety Car/VSC scenarios |
 | `train.py` | PPO training (Stable-Baselines3), keeps the best checkpoint by reward per step |
-| `safety_layer.py` | Ten named rules (wet tyres in rain, no aggressive style under Safety Car, two mandatory dry compounds, …) that override unsafe actions and explain every override |
+| `safety_layer.py` | Nine named rules (wet tyres in rain, no aggressive style under Safety Car, two mandatory dry compounds, …) that override unsafe actions and explain every override |
 | `api.py` | REST API: single prediction, batch prediction over a race, rule-based explanation |
 | `evaluate_holdout.py` | Leave-one-track-out evaluation: train on two tracks, test on the third |
 | `predict_strategies.py` | In-sample evaluation: RAW policy vs SAFE (policy + rules) against the real drivers' decisions |
@@ -43,13 +43,44 @@ flowchart LR
 | R1 | rain | compound must be WET |
 | R2 | damp track | compound must be INTER |
 | R3a | dry track | INTER/WET not allowed |
-| R4 | critically low tyre life | pit is forced |
-| R5 | dry track, tyres in very good condition | pointless pit is blocked |
+| R4 | *(removed)* | an earlier version forced a pit on brand-new tyres, see below |
+| R5 | dry track, no SC/VSC/red flag, tyres younger than 10 laps | pointless pit is blocked |
 | R6 | wet or damp track | no aggressive style |
 | R7 | small gap to the car ahead | conservative style |
 | R8 | large gap on a dry track | conservative style relaxed to neutral |
 | R9 | Safety Car / VSC / red / yellow flag | no aggressive style (overtaking forbidden) |
 | R10 | dry race, only one dry compound used near the end | pit and compound change are forced (FIA rule) |
+
+### Tyre age (`TyreLife`)
+
+In FastF1, `TyreLife` is the **age** of the tyre set in laps (1 = new tyre).
+Earlier versions of the safety layer and the reward read it as *remaining*
+life: R4 forced a pit when `TyreLife < 2` (on brand-new tyres, 22 laps in the
+data), R5 blocked a pit when `TyreLife > 30` (on the oldest tyres; it blocked
+the two real stops at 33 laps, both under the Safety Car at Silverstone), and
+the reward paid for pitting on new tyres. All of this now reads `TyreLife` as
+age, with thresholds taken from the 17 real pit stops (`TYRE_AGE_FRESH` and
+`TYRE_AGE_WORN` in `utils.py`):
+
+| Real pit stops (2023 data) | Tyre age |
+|---|---|
+| range | 14-33 laps (green flag 16-30; the two at 33 under the Safety Car) |
+| lower quartile / median | 20 / 26 laps |
+
+- **R5** blocks a pit on tyres younger than 10 laps on a dry track, unless the
+  Safety Car, VSC or red flag makes the stop cheap. 10 leaves a margin under
+  the earliest real stop (14); applied to the drivers' own decisions it blocks
+  none of the 17 real stops.
+- **R4 is removed.** A forced pit on old tyres has no support in the data: no
+  stop happened above 33 laps, yet sets were run up to 50 laps old to the
+  finish (17 laps above 33 without a stop), and the safe limit depends on
+  compound and track. A threshold inside the data range would override real
+  decisions, one above it would never fire. The id R4 stays free so R5-R10
+  keep their numbers.
+- **Reward:** pitting from age 20 (the pit window) or in rain/damp +1.5,
+  pitting below age 10 on a dry track without SC/VSC/red -1.0, in between 0.
+  The old penalty for staying out on "low tyre life" (i.e. on new tyres) and
+  the `+0.3 * TyreLife` term in the base reward are gone.
 
 ---
 
@@ -65,17 +96,52 @@ training tracks.
 
 ```bash
 python prepare_data.py       # needs internet (FastF1)
-python evaluate_holdout.py   # ~25 min on a laptop CPU, writes docs/holdout_results.md
+python evaluate_holdout.py   # 3 seeds x 3 folds, ~1 h on a laptop CPU, writes docs/holdout_results.md
 ```
 
-The table in [`docs/holdout_results.md`](docs/holdout_results.md) reports, per
-held-out track: compound accuracy, style accuracy (only on laps with a style
-label, see below), pit recall / precision / predicted pit rate, and the same
-model's in-sample compound accuracy for comparison.
+Training is not reproducible enough to trust a single run: with the same code
+and data, compound accuracy on one held-out track moved by up to ~20 points
+between training seeds. `evaluate_holdout.py` therefore trains every fold with
+three seeds and reports the mean, the range and one row per seed
+([`docs/holdout_results.md`](docs/holdout_results.md)).
 
-Pit stops happen on only ~2.5 % of laps, so accuracy is not a meaningful
-metric for them (a model that never pits reaches 97.5 %); recall and precision
-are reported instead.
+Held-out results, SAFE = policy + safety layer, mean over seeds 0, 1, 2:
+
+| Held-out track | Compound (min-max over seeds) | Baseline | Style | Baseline | Pit recall | Pit precision | Pit rate |
+|---|---|---|---|---|---|---|---|
+| Silverstone | 68.3 % (52-80 %) | 6.8 % | 45.9 % | 56.6 % | 33 % | 62 % | 1.3 % |
+| Monza | 52.8 % (35-73 %) | 41.7 % | 32.5 % | 41.1 % | 67 % | 62 % | 2.1 % |
+| Barcelona | 49.7 % (48-51 %) | 29.9 % | 46.6 % | 52.9 % | 92 % | 12 % | 22.3 % |
+| **mean** | **56.9 % (46-67 %)** | 26.1 % | **41.6 %** | 50.2 % | **69 %** | 18 % | 8.6 % |
+
+Per seed, the agent catches 14, 14 and 7 of the 17 real pit stops (11.7 on
+average) with a pooled precision of 17-18 %.
+
+- **Compound choice generalises:** above the baseline on average and on every
+  track except Monza in one seed, but the spread between seeds is large.
+- **Driving style does not generalise:** below the majority-class baseline on
+  every track. With a label from measured pace instead of a rule over the
+  agent's own inputs, the current features are not enough to predict it.
+- **Pit stops:** most false pit calls come from Barcelona (22 % of laps); on the
+  other two tracks the agent pits on ~2 % of laps, close to the real 2.5 %.
+  Pit stops are rare, so accuracy is not a meaningful metric for them (a model
+  that never pits reaches 97.5 %); recall and precision are reported instead.
+
+**Effect of the tyre-age fix** (held-out, mean over seeds; before: three runs
+of the previous code):
+
+| | Before | After |
+|---|---|---|
+| Compound | 54.8 % (51-61 %) | 56.9 % (46-67 %) |
+| Real pit stops caught (of 17) | 10.3 (14, 13, 4) | 11.7 (14, 14, 7) |
+| Pit precision (pooled) | 14 % | 18 % |
+| Pit rate | 11.0 % | 8.6 % |
+| Real stops blocked by the safety layer | 2 in every run (old R5, age 33 under SC) | 0 |
+| Style | 42.4 % | 41.6 % |
+
+The compound and style differences are within the seed-to-seed spread. The
+clear effects are on pits: the safety layer no longer blocks real stops, and
+the agent makes fewer false pit calls.
 
 ### Driving-style label
 
@@ -91,13 +157,14 @@ nothing about the driver's choice (lap 1, pit in/out laps, SC/VSC/yellow,
 laps FastF1 marks as inaccurate) are left unlabeled (`-1`) and are excluded
 from the style reward and from style accuracy.
 
-### Previous in-sample numbers (v6, historical)
+### Previous numbers (historical)
 
-Before these fixes, v6 was evaluated on all 674 laps it was trained on, with
-random gaps and the gap-based style rule: compound 69.6 % (baseline 43.9 %),
-style 64.2 % (baseline 42.1 %), pit recall 88 % / precision 24 %. These numbers
-are in-sample and are kept only for reference; `predict_strategies.py` still
-produces this kind of in-sample report.
+An early version was evaluated only on the 674 laps it was trained on, with
+random gaps and a gap-based style rule: compound 69.6 % (baseline 43.9 %),
+style 64.2 % (baseline 42.1 %), pit recall 88 % / precision 24 %. The first
+held-out run of the corrected data (one seed, before the tyre-age fix) gave
+compound 52.8 % (baseline 26.1 %), style 43.2 %, 14 of 17 pit stops. These are
+kept only to document how the evaluation changed.
 
 ---
 
@@ -108,7 +175,11 @@ produces this kind of in-sample report.
 
 The trained models (`saved_models/`) and the prepared data (`data/`) are committed, so the API and the evaluation can run without retraining.
 
-> **Regenerate the data after updating.** The committed `data/` was built by an older `prepare_data.py`: it has random `FrontGap`/`RearGap`, the old gap-based style label, undecoded `TrackStatus` strings (e.g. `41`), no `track_ids.npy`, and its "Spa" laps are actually the **Spanish** GP (FastF1 resolved the short name `'Spa'` to Barcelona). Run `python prepare_data.py` and then `python train.py` / `python evaluate_holdout.py` to get data and models consistent with the current code.
+> **FastF1 account.** Since FastF1 3.9, downloading new sessions requires an
+> F1TV Access (or higher) account; FastF1 asks for it on the first download.
+> Sessions already in the local cache (`data/cache`) load without signing in.
+> The Belgian GP was planned as the third track, but the Spanish GP
+> (Barcelona) was already cached and is used instead.
 
 ## Installation
 
@@ -134,9 +205,10 @@ python train.py          # PPO training with curriculum, saves saved_models/*_be
 ### 2. Evaluate
 
 ```bash
-python evaluate_holdout.py              # held-out: train on 2 tracks, test on the 3rd (all folds)
-python evaluate_holdout.py --tracks Spa # one fold only
-python train.py --holdout Spa           # train a single held-out model with plots
+python evaluate_holdout.py                # held-out: train on 2 tracks, test on the 3rd (all folds, seeds 0 1 2)
+python evaluate_holdout.py --seeds 0      # one seed only (~20 min)
+python evaluate_holdout.py --tracks Monza # one fold only
+python train.py --holdout Monza           # train a single held-out model with plots
 python predict_strategies.py            # in-sample report for the model used by the API
 ```
 
@@ -241,7 +313,10 @@ pytest -v
 - **Only three tracks.** The leave-one-track-out evaluation has three folds with ~200 laps each, so the held-out numbers have a large variance; more races would make them more reliable.
 - **Gap features are end-of-lap intervals.** `FrontGap` and `RearGap` are the real time differences to the car one position ahead / behind at the timing line at the end of the lap, computed from all drivers' lap times (`compute_gaps` in `utils.py`). They are clipped to 10 s (leader, last car, or a missing neighbour also get 10 s), and they do not see a lapped car that is physically in front.
 - **Style is still a proxy.** The pace-based label comes from real timing data, but a slow lap can also be caused by traffic or dirty air rather than a deliberate choice. The residual uses the lap's own `LapTime`, which is also an observed feature, so the agent sees part of the information the label is built from.
-- **Pit frequency.** The agent pits more often than real drivers (~9 % of laps vs ~2.5 %), a consequence of the asymmetric reward that prevents the opposite failure (never pitting). The safety layer still enforces the strategy rules independently.
+- **Pit frequency.** On held-out tracks the agent pits on ~9 % of laps on average (real drivers ~2.5 %), almost all of it at Barcelona; a consequence of the asymmetric imitation reward that prevents the opposite failure (never pitting).
+- **Seed variance.** Results move by up to ~20 points between training seeds on a single track, so only averages over seeds are meaningful.
+- **Checkpoint selection.** `train.py` keeps the checkpoint with the best reward per step, but the easy curriculum level has fewer synthetic rain/SC laps and scores higher, so an early checkpoint is usually selected. Evaluating every checkpoint at a fixed difficulty would remove this bias.
+- **No tyre-age limit.** No rule forces a stop on very old tyres, because the data does not support a single age limit (see Tyre age above).
 - **Not a physical race simulation.** The environment replays real laps with synthetic rain and Safety Car scenarios on top; `TyreLife` and other features do not change as a consequence of the agent's decisions.
 - **No memory across laps.** `LSTMFeatureExtractor` in `model.py` is kept as a starting point for future work. Real memory over laps would require `RecurrentPPO` from `sb3-contrib` instead of standard PPO.
 
