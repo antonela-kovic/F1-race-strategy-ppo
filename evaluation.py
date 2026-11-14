@@ -49,7 +49,8 @@ def run_policy(model, obs_array, force_window=3):
     raw_actions, safe_actions = [], []
     stats = {"pit_overrides": 0, "comp_overrides": 0, "style_overrides": 0,
              "r10_events": 0, "laps_with_violation": 0, "laps_with_override": 0,
-             "dry_races": 0, "dry_races_r10_ok": 0}
+             "dry_races": 0, "dry_races_r10_ok": 0,
+             "rule_counts": {}}  # overrides per rule name
 
     for start, end in split_into_races(obs_array):
         race_state = RaceState(total_laps=end - start, force_window=force_window)
@@ -60,6 +61,7 @@ def run_policy(model, obs_array, force_window=3):
             safe, report = verify_action(obs, raw, selected_features, race_state=race_state)
 
             for o in report.overrides:
+                stats["rule_counts"][o["rule"]] = stats["rule_counts"].get(o["rule"], 0) + 1
                 key = {"pit": "pit_overrides", "compound": "comp_overrides",
                        "style": "style_overrides"}.get(o["field"])
                 if key:

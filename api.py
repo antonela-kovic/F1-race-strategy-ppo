@@ -7,7 +7,7 @@ from typing import List
 import numpy as np
 from stable_baselines3 import PPO
 from typing import Optional
-from utils import selected_features, scale_observation
+from utils import TYRE_AGE_FRESH, TYRE_AGE_WORN, selected_features, scale_observation
 from safety_layer import verify_action, humanize_action, RaceState
 from collections import Counter
 
@@ -166,17 +166,19 @@ def explain_strategy(obs: Observation):
     state = np.array(obs.state, dtype=np.float32)
     i = lambda name: selected_features.index(name)
 
-    tyre_life = state[i("TyreLife")]
+    tyre_age = state[i("TyreLife")]  # FastF1 TyreLife = age of the tyre set in laps
     compound = int(state[i("CompoundEncoded")])
     weather_temp = state[i("TrackTemperature")]
     front_gap = state[i("FrontGap")]
 
     analysis = {}
 
-    if tyre_life < 8:
-        analysis["pit"] = "PIT recommended - low tyre life."
+    if tyre_age >= TYRE_AGE_WORN:
+        analysis["pit"] = f"PIT window - tyres are {tyre_age:.0f} laps old."
+    elif tyre_age < TYRE_AGE_FRESH:
+        analysis["pit"] = f"No PIT - tyres are almost new ({tyre_age:.0f} laps)."
     else:
-        analysis["pit"] = "No PIT needed - tyres are still good."
+        analysis["pit"] = f"No PIT needed yet - tyres are {tyre_age:.0f} laps old."
 
     if weather_temp < 20:
         analysis["compound"] = "Low track temperature - harder tyres hold better."

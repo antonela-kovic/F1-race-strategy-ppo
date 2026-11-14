@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Any, Optional, Set
 import numpy as np
 
+from utils import PIT_WINDOW_STATUSES, TYRE_AGE_FRESH
+
 # Compound mapping
 # 0 SOFT, 1 MEDIUM, 2 HARD, 3 INTER, 4 WET
 COMPOUND_NAMES = {0: "SOFT", 1: "MEDIUM", 2: "HARD", 3: "INTER", 4: "WET"}
@@ -79,10 +81,10 @@ def verify_action(
     """
     if config is None:
         config = {
-            # Thresholds were relaxed (from 5.0 / 15.0) because stricter values
-            # overrode too many correct pit decisions and reduced pit accuracy.
-            "tyre_pit_force": 2.0,     # force a pit only when tyre life is critical
-            "tyre_pit_block": 30.0,    # block a pit only when the tyres are very good
+            # TyreLife is the tyre AGE in laps (1 = new). A pit on a dry track
+            # without SC/VSC/red flag is blocked below this age; see
+            # TYRE_AGE_FRESH in utils.py for how the value was derived.
+            "tyre_age_block_pit": float(TYRE_AGE_FRESH),
         }
 
     # ensure types
@@ -95,7 +97,9 @@ def verify_action(
     i_tyre = _idx(selected_features, "TyreLife")
 
     weather = int(round(float(s[i_weather])))
-    tyre_life = float(s[i_tyre])
+    tyre_age = float(s[i_tyre])  # FastF1 TyreLife = age of the tyre set in laps
+    track_status = (int(round(float(s[_idx(selected_features, "TrackStatus")])))
+                    if "TrackStatus" in selected_features else 1)
 
     # facts -> predicates
     wet = weather == 3
@@ -139,20 +143,25 @@ def verify_action(
         # MEDIUM/SOFT in the real data, so such a rule would erase a correctly
         # learned signal.
 
-    # R4: Very low tyre life => force PIT
-    triggered.append("R4_LOW_TYRE_FORCES_PIT")
-    if tyre_life < config["tyre_pit_force"]:
-        if pit != 1:
-            violations.append("R4: TyreLife very low -> PIT must be 1")
-            override("pit", pit, 1, "R4_LOW_TYRE_FORCES_PIT", f"TyreLife={tyre_life:.1f} < {config['tyre_pit_force']}")
-            pit = 1
+    # R4 (removed): an earlier version forced a pit when "TyreLife < 2",
+    # reading TyreLife as remaining life, so it forced pits on brand-new tyres.
+    # Read correctly (tyre age), a forced pit on very old tyres has no support
+    # in the data: no real stop happened above 33 laps, yet drivers ran sets up
+    # to 50 laps old to the finish (17 such laps without a stop), and the safe
+    # age limit depends on compound and track. Any threshold inside the data
+    # range would override real decisions, and one above it would never fire,
+    # so the rule is not used. The rule id R4 is kept free so R5-R10 keep their
+    # numbers.
 
-    # R5: Block pointless pit on dry + good tyres
-    triggered.append("R5_BLOCK_POINTLESS_PIT")
-    if dry and tyre_life > config["tyre_pit_block"]:
+    # R5: block a pointless pit on almost new tyres (dry, no SC/VSC/red flag;
+    # under those a stop is cheap and can be legitimate even on fresh tyres)
+    triggered.append("R5_BLOCK_PIT_ON_FRESH_TYRES")
+    pit_window = track_status in PIT_WINDOW_STATUSES
+    if dry and not pit_window and tyre_age < config["tyre_age_block_pit"]:
         if pit != 0:
-            violations.append("R5: Dry + good tyres -> PIT should be 0")
-            override("pit", pit, 0, "R5_BLOCK_POINTLESS_PIT", f"TyreLife={tyre_life:.1f} > {config['tyre_pit_block']} and dry")
+            violations.append("R5: Dry, no SC/VSC and almost new tyres -> PIT should be 0")
+            override("pit", pit, 0, "R5_BLOCK_PIT_ON_FRESH_TYRES",
+                     f"tyre age {tyre_age:.0f} laps < {config['tyre_age_block_pit']:.0f}, dry, no SC/VSC")
             pit = 0
 
     # R6: Wet/damp -> avoid aggressive style
@@ -183,8 +192,6 @@ def verify_action(
     # regulations, so an aggressive style (which only makes sense when trying
     # to overtake) is not allowed.
     if "TrackStatus" in selected_features:
-        i_track = _idx(selected_features, "TrackStatus")
-        track_status = int(round(float(s[i_track])))
         caution = track_status in CAUTION_STATUSES
 
         triggered.append("R9_CAUTION_FORBIDS_AGGRESSIVE")

@@ -5,7 +5,8 @@
 import gym
 from gym import spaces
 import numpy as np
-from utils import selected_features, scale_observation, STYLE_UNLABELED
+from utils import (PIT_WINDOW_STATUSES, STYLE_UNLABELED, TYRE_AGE_FRESH, TYRE_AGE_WORN,
+                   scale_observation, selected_features)
 
 # Curriculum difficulty does not filter laps by weather (all available races
 # are dry). Instead, it controls how often the agent encounters synthetic but
@@ -183,7 +184,7 @@ class FastF1MultiActionEnv(gym.Env):
         lap = self.filtered_obs_array[self.index]
         i = lambda name: selected_features.index(name)
         lap_time = lap[i("LapTime")]
-        tyre_life = lap[i("TyreLife")]
+        tyre_age = lap[i("TyreLife")]  # FastF1 TyreLife = age of the tyre set in laps (1 = new)
         front_gap = lap[i("FrontGap")]
         weather = lap[i("Weather")]
         track_status = lap[i("TrackStatus")] if "TrackStatus" in selected_features else 1
@@ -199,19 +200,32 @@ class FastF1MultiActionEnv(gym.Env):
         if comp in (0, 1, 2):
             self.dry_compounds_used.add(int(comp))
 
-        # Base reward, normalised to keep its scale comparable to the decision terms
-        reward = (100 - lap_time * 0.5 + 0.3 * tyre_life) / 10.0
+        # Base reward from the lap time, normalised to keep its scale comparable
+        # to the decision terms. It does not depend on the action (the laps are
+        # replayed). An earlier "+ 0.3 * tyre_life" term was removed: with
+        # TyreLife being the tyre AGE it rewarded older tyres, and lap time
+        # already reflects tyre wear.
+        reward = (100 - lap_time * 0.5) / 10.0
 
-        # Pit logic
+        # Pit logic, with TyreLife read as tyre age (thresholds from the data,
+        # see TYRE_AGE_FRESH / TYRE_AGE_WORN in utils.py):
+        #   - pit in the pit window (worn tyres) or in rain/damp: +1.5
+        #   - pit on almost new tyres on a dry track without SC/VSC/red: -1.0
+        #   - pit at an age in between: 0 (real stops at 14-19 laps exist)
+        # The earlier "pit when tyre_life < 10 -> +1.5" and "stay out when
+        # tyre_life < 5 -> -3" read TyreLife as remaining life and rewarded the
+        # opposite. There is intentionally no penalty for staying out on old
+        # tyres: drivers ran sets up to 50 laps old to the finish.
         if pit == 1:
-            reward += 1.5 if (tyre_life < 10 or weather > 1) else -1.0
-        if pit == 0 and tyre_life < 5:
-            reward -= 3.0
+            if weather > 1 or tyre_age >= TYRE_AGE_WORN:
+                reward += 1.5
+            elif tyre_age < TYRE_AGE_FRESH and track_status not in PIT_WINDOW_STATUSES:
+                reward -= 1.0
 
-        # Driving style
+        # Driving style: pushing on old (worn) tyres is penalised
         if style == 0 and front_gap < 1.5:
             reward += 2.0
-        if style == 2 and tyre_life > 20:
+        if style == 2 and tyre_age > TYRE_AGE_WORN:
             reward -= 1.5
 
         # === Safety Car / VSC / red / yellow flag (TrackStatus) ===
@@ -242,15 +256,15 @@ class FastF1MultiActionEnv(gym.Env):
             reward -= 2.5
 
         # Dense (per-step) incentive for real dry-compound variety during a dry
-        # race. If the agent introduces a NEW (not yet used) dry compound while
-        # the tyres are fairly worn, it is most likely a genuine strategic change,
-        # so it is rewarded immediately instead of relying only on the terminal
-        # penalty at the end of the race.
+        # race. A NEW (not yet used) dry compound on young tyres (age < 15) is
+        # what a real stop looks like in the data: the new compound appears on
+        # the out-lap with a fresh set. It is rewarded immediately instead of
+        # relying only on the terminal penalty at the end of the race.
         if (
             not self.wet_or_damp_seen
             and comp in (0, 1, 2)
             and comp not in self._dry_compounds_before_this_lap
-            and tyre_life < 15
+            and tyre_age < 15
         ):
             reward += 2.5
 
