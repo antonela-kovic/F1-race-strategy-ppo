@@ -258,3 +258,38 @@ def test_unlabeled_style_gives_no_style_reward():
         _, reward, _, _, _ = env.step(np.array([0, 1, style]))
         totals.append(reward)
     assert totals[0] == pytest.approx(totals[1])
+
+
+# --- Pit reward reads TyreLife as tyre AGE (1 = new tyre) ---
+
+def _second_step_reward(tyre_age, pit, track_status=1, weather=1):
+    i = {name: idx for idx, name in enumerate(selected_features)}
+    obs = make_synthetic_obs([12], weather=weather)
+    obs[:, i["TyreLife"]] = tyre_age
+    obs[:, i["TrackStatus"]] = track_status
+    true = np.zeros((len(obs), 3), dtype=np.int32) + [pit, 1, 0]  # imitation term equal for both
+    env = FastF1MultiActionEnv(obs, true_actions=true, difficulty_level="easy")
+    env.reset(seed=1)
+    # first step uses MEDIUM once, so the second step is not affected by the
+    # "new dry compound on young tyres" bonus; the second step is measured
+    env.step(np.array([0, 1, 0]))
+    _, reward, _, _, _ = env.step(np.array([pit, 1, 0]))
+    return reward
+
+
+def test_pit_on_worn_tyres_is_rewarded_more_than_on_fresh_tyres():
+    assert _second_step_reward(tyre_age=26.0, pit=1) > _second_step_reward(tyre_age=3.0, pit=1)
+
+
+def test_pit_on_fresh_tyres_is_penalised_only_without_sc_vsc():
+    dry_green = _second_step_reward(tyre_age=3.0, pit=1, track_status=1)
+    under_sc = _second_step_reward(tyre_age=3.0, pit=1, track_status=4)
+    assert under_sc > dry_green
+
+
+def test_staying_out_is_not_penalised_by_tyre_age():
+    """Old reward penalised staying out when 'tyre_life < 5', i.e. on NEW
+    tyres. Staying out must cost the same at any tyre age now (the base reward
+    no longer depends on TyreLife)."""
+    assert _second_step_reward(tyre_age=2.0, pit=0) == pytest.approx(
+        _second_step_reward(tyre_age=40.0, pit=0))

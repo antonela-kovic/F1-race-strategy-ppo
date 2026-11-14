@@ -17,6 +17,29 @@ def load_true_actions(path="data/true_actions.npy"):
     return np.load(path)
 
 
+# === Tyre age (TyreLife) ===
+# In FastF1, TyreLife is the AGE of the tyre set in laps (1 = new tyre), not
+# the remaining life. Earlier versions of safety_layer.py and f1_env.py read it
+# as remaining life ("TyreLife < 2 = worn out"), which forced pits on brand-new
+# tyres and blocked pits on the oldest ones. The thresholds below come from the
+# 2023 data (data/obs_array.npy, 674 laps, 17 real pit stops):
+#   - every real pit stop happened at a tyre age of 14-33 laps (green-flag
+#     stops 16-30; the two at 33 were under the Safety Car), median 26,
+#     lower quartile 20;
+#   - no real stop below 14 laps.
+# TYRE_AGE_FRESH: below this age a pit on a dry track without SC/VSC/red flag
+#   is pointless; 10 laps leaves a margin under the earliest real stop (14), so
+#   a legitimate early stop on another track is not blocked.
+# TYRE_AGE_WORN: from this age on the car is in the pit window; it is the
+#   lower quartile of real pit ages (75 % of real stops are at 20 laps or more).
+TYRE_AGE_FRESH = 10
+TYRE_AGE_WORN = 20
+
+# TrackStatus codes under which a pit stop is cheap (Safety Car, red flag,
+# VSC, VSC ending), so even a stop on fresh tyres can be legitimate.
+PIT_WINDOW_STATUSES = {4, 5, 6, 7}
+
+
 # === Observation scaling (normalisation) ===
 # Features have very different ranges (e.g. LapTime ~80-150 vs FrontGap
 # 0.5-5). Without normalisation the network effectively ignores small-range
@@ -28,7 +51,7 @@ def load_true_actions(path="data/true_actions.npy"):
 # f1_env.py (training), predict_strategies.py and api.py (inference). A model
 # trained on scaled observations gives meaningless predictions on unscaled
 # ones and vice versa. verify_action() in safety_layer.py still receives the
-# RAW (unscaled) state, because its thresholds (e.g. tyre_life < 2.0,
+# RAW (unscaled) state, because its thresholds (e.g. tyre age < 10 laps,
 # front_gap < 1.5) are defined in real units.
 FEATURE_SCALE = {
     "TyreLife": 40.0,

@@ -56,6 +56,7 @@ def evaluate_fold(test_track, obs_array, true_actions, track_ids, args):
                       "split": split, "variant": variant})
             if variant == "SAFE":
                 m["r10_ok"] = f"{stats['dry_races_r10_ok']}/{stats['dry_races']}"
+                m["overrides"] = "; ".join(f"{r}={c}" for r, c in sorted(stats["rule_counts"].items()))
             rows.append(m)
     return rows
 
